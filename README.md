@@ -4,12 +4,14 @@
 
 公开仓库地址：
 
-```text
-https://github.com/AndersonHJB/CodexSkills
-```
+- 个人仓库：[AndersonHJB/CodexSkills](https://github.com/AndersonHJB/CodexSkills)
+- 组织仓库：[Brclio/Skills](https://github.com/Brclio/Skills)
+
+本次同步保留 Git 提交历史和全部分支、标签；后续更新需分别推送，两个仓库不会自动同步。
 
 ## Skills 列表
 
+- `zhixing-shipinhao-yijiancun`：视频号一键存免邀请码版，将本人发布或已获授权的视频号链接保存为本地 MP4；支持单条、最多 50 条批量、去重、有限并发和结果清单。无需作者侧激活或在线核验，首次仍需本人扫码登录腾讯元宝。安装、调用、排错与实测边界见 [`skills/zhixing-shipinhao-yijiancun/README.md`](skills/zhixing-shipinhao-yijiancun/README.md)。
 - `blindbox-ip-skill-4styles`：将个人或品牌描述转化为可复用的内容配图角色，提供治愈绘本手绘、极简符号卡通、盲盒潮玩公仔和日常扁平漫画四种画风；交付角色价值观、视觉 DNA、正面图、三视图、角色参考板、分层提示词和一致性测试图。使用说明见 [`skills/blindbox-ip-skill-4styles/README.md`](skills/blindbox-ip-skill-4styles/README.md)，授权范围见该目录下的 `LICENSE`。
 - `generate-personal-ip-avatars`：为零基础用户打造可配置个人 IP 盲盒；支持随机与浅色主题、8 张行业全身形象、官方高校/机构 VI 配色扩展、动作、八角度、24 种情绪、总拼图和离线 HTML 选择画廊。没有明确功能控制时默认全部开启。
 - `wechat-article-pipeline`：微信公众号文章流水线，支持文章重写、吸金标题与摘要、教程插图、公众号封面、图片上传 PicGoImage、Markdown 图片链接替换、文章归档、公众号可复制 HTML 排版。
@@ -28,6 +30,28 @@ https://github.com/AndersonHJB/CodexSkills
   - 一键复制的离线 HTML 查看页。
 
   所有内容出自同一份数据，渲染时自动核对引用名、台词覆盖、时长和连续性。使用说明见 [`skills/short-drama-pack/README.md`](skills/short-drama-pack/README.md)。
+
+## 视频号一键存（免邀请码）
+
+`zhixing-shipinhao-yijiancun` 面向 macOS 与 Windows 10/11，使用 Python 3.10+、Playwright 和本机 Chrome/Edge。安装后，将本人发布或已获授权的 `https://weixin.qq.com/sph/...` 分享链接发给 Codex 或 WorkBuddy，即可由助手完成检查、解析和本地保存；需要登录时由本人在专用窗口扫码。
+
+直接发送下面的提示词即可让 Codex 安装：
+
+```text
+请从 https://github.com/Brclio/Skills 安装 skills/zhixing-shipinhao-yijiancun，
+放入 ~/.codex/skills/zhixing-shipinhao-yijiancun，并运行当前系统的 setup 脚本检查依赖。
+```
+
+安装后在新会话中发送：
+
+```text
+使用 $zhixing-shipinhao-yijiancun 下载下面这条我已获授权的视频号视频，保存到默认目录：
+<完整分享链接>
+```
+
+默认保存到 `Downloads/视频号一键存`。批量任务复用同一登录，每批最多 50 条，默认 3 路文件下载，并生成逐条结果清单。完整的两平台安装命令、批量调用、隐私目录与故障排查见 [中文说明](skills/zhixing-shipinhao-yijiancun/README.md)。
+
+本版本已移除邀请码和作者服务器依赖；解析仍依赖腾讯网页内部接口。2026-10-22 已在 macOS 完成真实单条下载与完整解码检查；Windows 和真实批量下载尚未完成实测。来源和修改范围见 [来源说明](skills/zhixing-shipinhao-yijiancun/references/provenance.md)。
 
 ## 个人 IP 角色批量生成 Skill
 
