@@ -1,0 +1,4 @@
+interface:
+  display_name: "课程完整离线归档"
+  short_description: "保存整课文稿、图片与音视频，生成 Markdown、离线网页和可复核完整性报告"
+  default_prompt: "使用 $course-local-archive 完整归档这个课程：保存原文、所有素材、加密原件和可验证的解密版本，生成 Markdown、离线网页及完整性报告。"

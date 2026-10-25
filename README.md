@@ -11,6 +11,7 @@
 
 ## Skills 列表
 
+- `course-local-archive`：将已登录、已购或获授权的课程完整保存为原文 Markdown、HTML、图片、音频、视频与离线阅读网站；保留网页片源、原始 HLS 清单与分片、加密原件和经过验证的实际解密版本，附完整性审计。内置得到适配及旧版 v1 MP4 解密流程；其他平台按已验证适配处理。安装与调用见下方「课程完整离线归档」，工作流见 [`skills/course-local-archive/SKILL.md`](skills/course-local-archive/SKILL.md)。
 - `zhixing-shipinhao-yijiancun`：视频号一键存免邀请码版，将本人发布或已获授权的视频号链接保存为本地 MP4；支持单条、最多 50 条批量、去重、有限并发和结果清单。无需作者侧激活或在线核验，首次仍需本人扫码登录腾讯元宝。安装、调用、排错与实测边界见 [`skills/zhixing-shipinhao-yijiancun/README.md`](skills/zhixing-shipinhao-yijiancun/README.md)。
 - `blindbox-ip-skill-4styles`：将个人或品牌描述转化为可复用的内容配图角色，提供治愈绘本手绘、极简符号卡通、盲盒潮玩公仔和日常扁平漫画四种画风；交付角色价值观、视觉 DNA、正面图、三视图、角色参考板、分层提示词和一致性测试图。使用说明见 [`skills/blindbox-ip-skill-4styles/README.md`](skills/blindbox-ip-skill-4styles/README.md)，授权范围见该目录下的 `LICENSE`。
 - `generate-personal-ip-avatars`：为零基础用户打造可配置个人 IP 盲盒；支持随机与浅色主题、8 张行业全身形象、官方高校/机构 VI 配色扩展、动作、八角度、24 种情绪、总拼图和离线 HTML 选择画廊。没有明确功能控制时默认全部开启。
@@ -30,6 +31,30 @@
   - 一键复制的离线 HTML 查看页。
 
   所有内容出自同一份数据，渲染时自动核对引用名、台词覆盖、时长和连续性。使用说明见 [`skills/short-drama-pack/README.md`](skills/short-drama-pack/README.md)。
+
+## 课程完整离线归档
+
+`course-local-archive` 适合提供一个课程或章节链接后，保存整门课程的原文与实际素材。每门课使用独立目录，支持同课续存，保留原始正文字符串、Markdown、HTML、图片、全部音轨、视频与附件，并生成带搜索和本地播放器的离线阅读器。
+
+遇到视频时选择来源实际返回的最高画质，保留原始 HLS 清单、分片与无损封装 MP4。已验证的得到旧 v1 格式支持从加密原件直接解密，保留加密原件、实际解密 MP4 和独立网页源三套文件，并核对原件哈希、全流解码及独立片源内容。网站默认采用经过核验的可播放版本，下载页保留其他原件。
+
+让 Codex 安装：
+
+```text
+请从 https://github.com/Brclio/Skills 安装 skills/course-local-archive，
+放入 ~/.codex/skills/course-local-archive，并检查 Skill 与媒体工具依赖。
+```
+
+安装后在下一轮对话调用：
+
+```text
+使用 $course-local-archive 完整归档这个课程：<课程链接>。
+保留所有原始素材、加密原件及可验证的实际解密版本，生成 Markdown 和离线网页。
+```
+
+需要当前账号正常具有课程访问权限；登录及媒体授权材料只供本次会话使用，不存入技能或公开归档。离线建站与基础审计使用 Python 3，媒体保存和核验需要 FFmpeg/FFprobe。当前实际验证的旧 v1 解密原语采用 macOS CommonCrypto；其他系统、加密版本和平台须验证对应适配。极客时间通过同级已安装的 `geekbang-course-archive` 专门技能处理。
+
+技能包含浏览器采集助手、动态课程初始化器、下载/解密/核验脚本与离线网站模板。官方原生库仅作为带来源和 SHA 的静态算法参考。完整步骤与边界见 [得到归档流程](skills/course-local-archive/references/dedao-workflow.md)、[旧 v1 解密流程](skills/course-local-archive/references/dedao-legacy-decryption.md) 和 [数据与证据契约](skills/course-local-archive/references/archive-contract.md)。
 
 ## 视频号一键存（免邀请码）
 

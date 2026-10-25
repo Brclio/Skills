@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<!-- Adapted from Brclio Design System's template-app.html. See README.md. -->
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file: data:; script-src 'self' file:; style-src 'self' file: 'unsafe-inline'; img-src 'self' file: data:; media-src 'self' file:; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'">
+  <title>__COURSE_TITLE__ · 本地课程库</title>
+  <link rel="stylesheet" href="web/app.css">
+</head>
+<body>
+  <a class="skip-link" href="#reader">跳到正文</a>
+  <header class="app-header">
+    <div class="header-brand"><span class="brand-mark" aria-hidden="true">读</span><h1>本地课程库</h1></div>
+    <div class="header-actions"><span class="offline-label"><span aria-hidden="true">●</span> 离线阅读</span><button class="button" id="menu-toggle" aria-controls="sidebar" aria-expanded="false">课程目录</button></div>
+  </header>
+  <div class="app-shell">
+    <aside class="app-sidebar" id="sidebar" aria-label="课程导航">
+      <div class="course-heading"><span class="eyebrow">COURSE ARCHIVE</span><div class="course-identity"><img id="course-cover" class="course-cover" alt="课程封面" hidden><h2 id="course-title">__COURSE_TITLE__</h2></div><p id="course-summary" class="muted"></p></div>
+      <p><a href="course-info.html">课程介绍与讲师简介 ↗</a><br><a href="resources.html">全部本地资源与下载 ↗</a></p>
+      <label class="search-label" for="search">搜索课程</label>
+      <div class="search-wrap"><span aria-hidden="true">⌕</span><input class="app-input" id="search" type="search" placeholder="标题或正文关键词" autocomplete="off"></div>
+      <p class="search-results muted" id="search-results" role="status" aria-live="polite"></p>
+      <nav id="lesson-list" aria-label="全部课程"></nav>
+      <p class="sidebar-foot">正文与素材保存在本地。<br>课程版权归课程作者。</p>
+    </aside>
+    <main class="app-main" id="reader" tabindex="-1">
+      <div class="reading-toolbar"><span id="lesson-position" class="eyebrow">LOCAL LIBRARY</span><div class="reading-actions"><button id="font-smaller" class="icon-button" aria-label="缩小正文字号">A−</button><button id="font-larger" class="icon-button" aria-label="增大正文字号">A＋</button><button class="button" id="print">打印</button></div></div>
+      <div id="reading-area"></div>
+      <footer class="reader-footer"><p>课程资料 · 本地存档 · 阅读样式：<a href="https://github.com/Brclio/brclio-design-system" target="_blank" rel="noopener noreferrer">Brclio Design System</a></p><a id="course-source" target="_blank" rel="noopener noreferrer">查看课程来源 ↗</a></footer>
+    </main>
+  </div>
+  <script id="course-data" type="application/json">__COURSE_DATA__</script>
+  <script src="web/app.js?v=20261024-local-media"></script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "artifact": "libddd_ff_protocol.so",
+  "abi": "arm64-v8a",
+  "bytes": 318496,
+  "sha256": "39b374b0230713b8de053dab135885a658c97ff06480eea4b7080fc2095531fc",
+  "official_source_page": "https://www.igetget.com/download",
+  "discovery_endpoint": "https://www.igetget.com/api/web/apk",
+  "official_apk_url": "https://staticcdn1-2.umiwi.com/qa/android/channel/13.7.0/20261017_200855/app_13.7.0_mix_20261017_080938_0.apk",
+  "official_apk_bytes": 258715197,
+  "official_apk_sha256": "8db39224960a3e8b0a842f7e459b884fdbdfa7a5e9f0389aea0d8c5ef8c38b23",
+  "official_apk_etag_md5_matched": true,
+  "apk_entry": "lib/arm64-v8a/libddd_ff_protocol.so",
+  "app_package": "com.luojilab.player",
+  "app_version": "13.7.0",
+  "use": "Read-only parsing of verified static native protocol parameters; do not install or execute this library.",
+  "content_privacy": "No account cookies, session tokens, real media keys, user identifiers, course data or course media accompany this reference artifact."
+}

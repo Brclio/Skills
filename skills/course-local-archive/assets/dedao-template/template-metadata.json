@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "platform": "dedao",
+  "template_version": 1,
+  "contains_course_content": false,
+  "contains_account_or_media_secrets": false,
+  "finalization": {
+    "command": "python3 scripts/finalize_archive.py --apply",
+    "default_without_apply": "read-only validation preview",
+    "requires": ["fresh passed audit", "same course and ordered catalog", "unchanged manifest and source snapshots", "unchanged audited output hashes", "complete per-lesson states"],
+    "retained_audit_snapshots": "raw/finalization-audits/<audit-sha256>.json",
+    "after_apply": "rerun audit_archive.py to bind the completed manifest"
+  },
+  "network_during_initialization": false,
+  "identity_configuration": {
+    "path": "course-config.json",
+    "required_fields": [
+      "platform",
+      "course_enid",
+      "source_url",
+      "protocol_library"
+    ],
+    "source_derived_fields": [
+      "expected_lesson_count",
+      "expected_video_count"
+    ],
+    "protocol_library_fields": [
+      "path",
+      "sha256",
+      "provenance",
+      "mode"
+    ],
+    "source_derived_fields_note": "Lesson count and expected media identities are derived from source catalogs and complete same-course exports; no prior course counts or IDs are embedded."
+  },
+  "inputs": {
+    "public_catalog": "raw/public/catalog.json",
+    "public_course_metadata": "raw/public/class-info.json",
+    "authorized_original_bodies": "raw/authorized-course.json",
+    "optional_extra_audio_aliases": "raw/authorized-extra-audio.json",
+    "normal_web_video_formats": "raw/authorized-web-media.json",
+    "private_temporary_legacy_tokens": "external temporary 0600 file; never copy into skill or archive reports"
+  },
+  "manifest": {
+    "path": "course.json",
+    "lesson_identity_fields": [
+      "id",
+      "enid",
+      "title",
+      "section",
+      "source_url"
+    ],
+    "source_files": [
+      "markdown_path",
+      "html_path",
+      "raw_blocks_path",
+      "source_info_path",
+      "source_body_path"
+    ],
+    "default_media_arrays": [
+      "audio",
+      "video"
+    ],
+    "retained_video_arrays": [
+      "video_web_alternatives",
+      "video_encrypted_original"
+    ],
+    "local_media_fields": [
+      "path",
+      "label",
+      "poster",
+      "duration",
+      "resolution",
+      "bytes",
+      "sha256",
+      "archive_report"
+    ],
+    "media_paths_relative_to": "archive root",
+    "body_embedded_paths_relative_to": "body source file"
+  },
+  "runtime": {
+    "python": ">=3.9",
+    "media_tools": [
+      "ffmpeg",
+      "ffprobe"
+    ],
+    "current_legacy_aes_backend": "macOS system CommonCrypto",
+    "official_reference_library_execution": false
+  },
+  "supported_observed_video_mapping": "one primary video per lesson; reject or adapt multiple-video lessons explicitly",
+  "page_design": {
+    "source": "https://github.com/Brclio/brclio-design-system",
+    "attribution": "Brclio (黄家宝)",
+    "license": "CC BY-NC-SA 4.0",
+    "license_url": "https://creativecommons.org/licenses/by-nc-sa/4.0/"
+  }
+}
