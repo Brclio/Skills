@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -101,38 +102,61 @@ def archive(item, previous):
     lid, index, title, video = item
     key = f"{lid}-{index}"
     old = previous.get(key)
-    resolution = next((n for n in (1080, 720, 480) if video.get(f"bitrate_{n}")), None)
-    result = {"key": key, "lesson_id": lid, "video_index": index, "title": title, "source_media_id": str(video.get("dd_media_id_str") or video.get("dd_media_id") or ""), "source_declares_drm": bool(video.get("is_drm")), "source_duration": video.get("duration"), "resolution_selected": resolution, "available_resolutions": [n for n in (1080, 720, 480) if video.get(f"bitrate_{n}")], "subtitles": []}
+    available_resolutions = sorted({int(k.split("_")[1]) for k,v in video.items() if re.fullmatch(r"bitrate_[0-9]+",k) and isinstance(v,str) and v.startswith(("https://","http://"))},reverse=True)
+    resolution = available_resolutions[0] if available_resolutions else None
+    result = {"key": key, "lesson_id": lid, "video_index": index, "title": title, "source_media_id": str(video.get("dd_media_id_str") or video.get("dd_media_id") or ""), "source_declares_drm": bool(video.get("is_drm")), "source_duration": video.get("duration"), "resolution_selected": resolution, "available_resolutions": available_resolutions, "subtitles": []}
     if not resolution:
         return {**result, "status": "source_url_missing", "playable": False}
     url = video[f"bitrate_{resolution}"]
     name = lid + (f"-{index}" if index else "")
     target = ROOT / "assets/video/encrypted" / (name + ".mp4.enc")
-    # Before the report existed, the shortest source was retained for the probe.
-    initial_sample = ROOT / "assets/video" / (name + ".mp4")
-    if initial_sample.is_file() and not target.exists():
-        target.parent.mkdir(parents=True, exist_ok=True)
-        initial_sample.replace(target)
+    plain = ROOT / 'assets/video/original' / (name + '.mp4')
+    # A retained Web output is never moved or mistaken for source input.
+    # Migrate a legacy source only when the prior source report binds its bytes.
+    if old and old.get('source_url') == url and old.get('source_media_id') == result['source_media_id']:
+        prior = (ROOT / old.get('path', '')).resolve()
+        if prior.is_relative_to(ROOT) and prior.is_file() and prior.stat().st_size == old.get('bytes') and digest(prior) == old.get('sha256'):
+            if old.get('playable'):
+                plain.parent.mkdir(parents=True, exist_ok=True)
+                if prior != plain: shutil.copyfile(prior, plain)
+                target = plain
+            elif prior == target:
+                pass
+        else:
+            old = None
+    else:
+        old = None
     try:
         result.update(download(url, target, old))
-        result.update({"source_url": url, "path": target.relative_to(ROOT).as_posix(), "download_complete": True})
+        result.update({"source_url": url, "source_url_sha256":hashlib.sha256(url.encode()).hexdigest(), "path": target.relative_to(ROOT).as_posix(), "download_complete": True})
         with target.open("rb") as f:
             prefix = f.read(16)
         result["has_mp4_ftyp_header"] = prefix[4:8] == b"ftyp"
         probe = run(["ffprobe", "-v", "error", "-show_format", "-show_streams", "-of", "json", str(target)])
-        decode = run(["ffmpeg", "-nostdin", "-v", "error", "-xerror", "-i", str(target), "-f", "null", "-"])
+        if prefix.lstrip().startswith((b'<', b'{', b'[')):
+            raise ValueError('Source URL returned text/error content instead of a media original')
+        decode = run(["ffmpeg", "-nostdin", "-v", "error", "-xerror", "-err_detect", "explode", "-protocol_whitelist", "file,crypto,data", "-i", str(target), "-map", "0:v", "-map", "0:a", "-progress", "pipe:1", "-nostats", "-f", "null", "-"])
         result["probe"] = {"returncode": probe["returncode"], "stderr": probe["stderr"]}
         if probe["returncode"] == 0:
             result["probe"]["data"] = json.loads(probe["stdout"])
-        result["decode"] = {"returncode": decode["returncode"], "stderr": decode["stderr"]}
-        result["playable"] = probe["returncode"] == 0 and decode["returncode"] == 0
+        streams = result.get('probe', {}).get('data', {}).get('streams', [])
+        video_streams = [s for s in streams if s.get('codec_type') == 'video']
+        audio_streams = [s for s in streams if s.get('codec_type') == 'audio']
+        reached_eof = 'progress=end' in decode['stdout'].splitlines()
+        result["decode"] = {"returncode": decode["returncode"], "stderr": decode["stderr"], 'all_audio_video_streams':decode['returncode']==0 and reached_eof, 'mapped_audio_video_streams':'all', 'reached_eof':reached_eof, 'err_detect':'explode'}
+        result["playable"] = probe["returncode"] == 0 and decode["returncode"] == 0 and reached_eof and bool(video_streams) and bool(audio_streams)
         if result["playable"]:
-            final = ROOT / "assets/video" / (name + ".mp4")
-            target.replace(final)
-            result["path"] = final.relative_to(ROOT).as_posix()
+            plain.parent.mkdir(parents=True, exist_ok=True)
+            if target != plain: target.replace(plain)
+            result["path"] = plain.relative_to(ROOT).as_posix()
             result["status"] = "complete"
+            result['source_role'] = 'plaintext_original'
+            result['duration'] = float(result['probe']['data']['format']['duration'])
+            result['video_stream_count'] = len(video_streams)
+            result['audio_stream_count'] = len(audio_streams)
         else:
             result["status"] = "drm_source_saved_unplayable" if result["source_declares_drm"] else "source_saved_unplayable"
+            result['source_role'] = 'encrypted_original' if result['source_declares_drm'] else 'unplayable_original'
         for field in ("caption", "vtt_caption"):
             caption = video.get(field)
             if isinstance(caption, str) and caption.startswith(("https://", "http://")):

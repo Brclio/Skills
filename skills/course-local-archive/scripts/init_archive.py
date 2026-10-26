@@ -53,10 +53,12 @@ def main():
         relative=source.relative_to(TEMPLATE);target=output/relative
         if target.exists():retained.append(relative.as_posix());continue
         target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,target);copied.append(relative.as_posix())
-    for name in ['raw/public','raw/authorized','raw/lessons','raw/audio-archive','content','assets/images','assets/audio','assets/video/encrypted','assets/video/decrypted','assets/attachments']:
+    for name in ['raw/public','raw/authorized','raw/lessons','raw/audio-archive','content','assets/images','assets/audio','assets/video/original','assets/video/encrypted','assets/video/decrypted','assets/subtitles','assets/attachments']:
         (output/name).mkdir(parents=True,exist_ok=True)
     title=args.title or existing.get('title') or '本地课程归档'
-    cfg={**existing,'schema_version':1,'platform':'dedao','course_enid':course_id,'source_url':url,'title':title,'expected_lesson_count':existing.get('expected_lesson_count'),'expected_video_count':existing.get('expected_video_count'),'protocol_library':{'path':str(VENDOR),'sha256':library_sha,'provenance':str(PROVENANCE),'mode':'read_only_static_parameter_parsing'},'template_version':1}
+    available_version=json.loads((TEMPLATE/'template-metadata.json').read_text(encoding='utf-8')).get('template_version',1)
+    retained_version=existing.get('template_version',available_version)
+    cfg={**existing,'schema_version':1,'platform':'dedao','course_enid':course_id,'source_url':url,'title':title,'expected_lesson_count':existing.get('expected_lesson_count'),'expected_video_count':existing.get('expected_video_count'),'protocol_library':{'path':str(VENDOR),'sha256':library_sha,'provenance':str(PROVENANCE),'mode':'read_only_static_parameter_parsing'},'template_version':retained_version,'available_template_version':available_version,'template_update_available':retained_version!=available_version}
     cfg.setdefault('created_at_utc',datetime.now(timezone.utc).isoformat())
     config_path.write_text(json.dumps(cfg,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
     manifest=output/'course.json'

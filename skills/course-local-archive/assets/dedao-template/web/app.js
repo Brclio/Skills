@@ -1,6 +1,11 @@
 "use strict";
 (() => {
   const data = JSON.parse(document.getElementById("course-data").textContent);
+  // Browser QA reads the JSON actually loaded by this page and these markers.
+  document.documentElement.dataset.readerPayloadSha256 = data.reader_payload_sha256 || "";
+  document.documentElement.dataset.sourceManifestSha256 = data.source_manifest_sha256 || "";
+  document.documentElement.dataset.appJsSha256 = data.asset_versions?.app_js || "";
+  document.documentElement.dataset.appCssSha256 = data.asset_versions?.app_css || "";
   const lessons = data.lessons || [];
   const byId = new Map(lessons.map((lesson, index) => [lesson.id, {lesson, index}]));
   const $ = id => document.getElementById(id);
@@ -45,6 +50,25 @@
     $("search-results").textContent = query ? `找到 ${count} / ${lessons.length} 讲` : "按课程原始顺序排列";
   }
 
+  function attachSubtitles(lesson) {
+    const subtitles = (lesson.subtitles || []).filter(track => track.format === "vtt" && safeHref(track.path));
+    const videos = Array.from($("reading-area").querySelectorAll("video"));
+    videos.forEach((video, index) => {
+      const path = video.getAttribute("src") || video.querySelector("source[src]")?.getAttribute("src");
+      const media = (lesson.video || []).find(track => track.path === path);
+      const videoIndex = Number(media?.video_index ?? video.dataset.videoIndex ?? index);
+      const tracks = subtitles.filter(track => Number(track.video_index || 0) === videoIndex);
+      const preferred = tracks.find(track => track.preferred) || tracks[0];
+      tracks.forEach((subtitle, n) => {
+        if (Array.from(video.querySelectorAll("track")).some(track => track.getAttribute("src") === subtitle.path)) return;
+        const track = document.createElement("track");
+        track.kind = "subtitles"; track.srclang = "zh"; track.label = `${subtitle.label || "中文字幕"}${tracks.length > 1 ? ` ${n + 1}` : ""}`;
+        track.src = subtitle.path; track.default = subtitle === preferred;
+        video.appendChild(track);
+      });
+    });
+  }
+
   function renderLesson(id) {
     const entry = byId.get(id);
     if (!entry) {
@@ -60,12 +84,13 @@
     const inlineAudioLabels = new Map(Array.from(sourceDocument.querySelectorAll("audio[src],audio source[src]"), media => [media.getAttribute("src"), media.closest(".source-audio")?.querySelector("p")?.textContent]));
     const inlineVideoLabels = new Map(Array.from(sourceDocument.querySelectorAll("video[src],video source[src]"), media => [media.getAttribute("src"), media.closest("figure,.source-video")?.querySelector("figcaption,p")?.textContent]));
     const source = safeHref(lesson.source_url);
-    const files = [lesson.markdown_path ? `<a href="${safeHref(lesson.markdown_path)}" download>下载 Markdown ↓</a>` : "", lesson.html_path ? `<a href="${safeHref(lesson.html_path)}" download>保存的正文 HTML ↓</a>` : "", ...(lesson.audio || []).filter(track => inlineAudioLabels.has(track.path)).map(track => `<a href="${safeHref(track.path)}" download>下载音频 · ${escape(inlineAudioLabels.get(track.path) || track.label || "课程音频")} ↓</a>`), ...(lesson.video || []).filter(track => inlineVideoLabels.has(track.path)).map(track => `<a href="${safeHref(track.path)}" download>下载视频 · ${escape(inlineVideoLabels.get(track.path) || track.label || "课程视频")} ↓</a>`), source ? `<a href="${source}" target="_blank" rel="noopener noreferrer">查看原文 ↗</a>` : ""].filter(Boolean).join("");
+    const files = [lesson.markdown_path ? `<a href="${safeHref(lesson.markdown_path)}" download>下载 Markdown ↓</a>` : "", lesson.html_path ? `<a href="${safeHref(lesson.html_path)}" download>保存的正文 HTML ↓</a>` : "", ...(lesson.audio || []).filter(track => inlineAudioLabels.has(track.path)).map(track => `<a href="${safeHref(track.path)}" download>下载音频 · ${escape(inlineAudioLabels.get(track.path) || track.label || "课程音频")} ↓</a>`), ...(lesson.video || []).filter(track => inlineVideoLabels.has(track.path)).map(track => `<a href="${safeHref(track.path)}" download>下载视频 · ${escape(inlineVideoLabels.get(track.path) || track.label || "课程视频")} ↓</a>`), ...(lesson.video_audio_components || []).flatMap(track => [`<a href="${safeHref(track.path)}" download>下载${escape(track.label || "视频音轨")} ↓</a>`, track.encrypted_source ? `<a href="${safeHref(track.encrypted_source.path)}" download>源音频备份（不可直接播放） ↓</a>` : ""]), ...(lesson.subtitles || []).map(track => `<a href="${safeHref(track.path)}" download>下载 ${escape(track.label || (track.format || "字幕").toUpperCase())} ↓</a>`), source ? `<a href="${source}" target="_blank" rel="noopener noreferrer">查看原文 ↗</a>` : ""].filter(Boolean).join("");
     const audio = (lesson.audio || []).filter(track => !inlineAudioLabels.has(track.path)).map((track, n) => `<div class="audio-track"><label for="audio-${n}">${escape(track.label || "课程音频")}</label><audio id="audio-${n}" controls preload="none" src="${safeHref(track.path)}">此浏览器无法播放音频，请使用下载链接。</audio><a class="audio-download" href="${safeHref(track.path)}" download>下载音频 ↓</a></div>`).join("");
-    const video = (lesson.video || []).filter(track => !inlineVideoLabels.has(track.path)).map((track, n) => `<div class="video-track"><label for="video-${n}">${escape(track.label || "课程视频")}</label><video id="video-${n}" controls playsinline preload="none" src="${safeHref(track.path)}"${track.poster ? ` poster="${safeHref(track.poster)}"` : ""}>此浏览器无法播放视频，请使用下载链接。</video><a class="video-download" href="${safeHref(track.path)}" download>下载视频 ↓</a></div>`).join("");
+    const video = (lesson.video || []).filter(track => !inlineVideoLabels.has(track.path)).map((track, n) => `<div class="video-track"><label for="video-${n}">${escape(track.label || "课程视频")}</label><video id="video-${n}" data-video-index="${Number(track.video_index || 0)}" controls playsinline preload="none" src="${safeHref(track.path)}"${track.poster ? ` poster="${safeHref(track.poster)}"` : ""}>此浏览器无法播放视频，请使用下载链接。</video><a class="video-download" href="${safeHref(track.path)}" download>下载视频 ↓</a></div>`).join("");
     const issueCount = data.issues.filter(issue => issue.lesson_id === lesson.id).length;
     const previous = lessons[index - 1], next = lessons[index + 1];
     $("reading-area").innerHTML = `<article><header class="article-header"><p class="article-kicker">${escape(lesson.section || data.title)}</p><h2>${escape(lesson.title)}</h2><div class="article-meta"><span>第 ${index + 1} / ${lessons.length} 讲</span><span class="status${lesson.imported ? "" : " pending"}">${lesson.imported ? "正文已保存" : "正文未导入"}</span>${lesson.audio.length ? `<span>本地音频 ${lesson.audio.length} 段</span>` : ""}${lesson.video.length ? `<span>本地视频 ${lesson.video.length} 段</span>` : ""}</div></header>${audio ? `<section class="audio-area" aria-label="本讲音频">${audio}</section>` : ""}${video ? `<section class="video-area" aria-label="本讲视频">${video}</section>` : ""}${lesson.imported ? `<div class="article-body">${lesson.html}</div>` : '<div class="empty-state"><h2>本讲正文尚未导入</h2><p>目前只有课程目录记录；正文、图片、音频和视频仍需从课程来源保存。</p></div>'}${issueCount ? `<p class="import-notice">本讲有 ${issueCount} 项素材或源文件未保存完整，详见 web/build-report.json。</p>` : ""}${files ? `<div class="article-files">${files}</div>` : ""}<nav class="article-nav" aria-label="前后课程"><div>${previous ? `<a href="#lesson=${encodeURIComponent(previous.id)}"><small>← 上一讲</small>${escape(previous.title)}</a>` : ""}</div><div>${next ? `<a href="#lesson=${encodeURIComponent(next.id)}"><small>下一讲 →</small>${escape(next.title)}</a>` : ""}</div></nav></article>`;
+    attachSubtitles(lesson);
     $("lesson-position").textContent = `LESSON ${String(index + 1).padStart(2, "0")} / ${String(lessons.length).padStart(2, "0")}`;
     document.title = `${lesson.title} · ${data.title}`;
     try { localStorage.setItem("course-current-lesson:" + data.title, lesson.id); } catch {}

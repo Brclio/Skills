@@ -22,7 +22,7 @@
 
 ## 私有输入与执行
 
-用 `export_dedao_private_tokens_in_page.js` 在已购页面取得媒体 token，不能导出账户 Cookie。先将 `window.__courseArchiveOptions.mode='private_tokens'`（保留其中 courseId 等配置）；仅在本次归档已要求原件解密时启用此模式。导出名为 `dedao-private-video-tokens-<courseId>-<complete|partial>.json`，先核对 complete 与预期集合。以创建时即0600的临时文件和0700目录接收；浏览器先落 Downloads 时立即受限搬移并删除原下载，不能放课程 raw 或技能包。
+用 `export_dedao_private_tokens_in_page.js` 在已购页面取得媒体 token，不能导出账户 Cookie。先将 `window.__courseArchiveOptions.mode='private_tokens'`（保留其中 courseId 等配置）；仅在本次归档已要求原件解密时启用此模式。导出名为 `dedao-private-video-tokens-<courseId>-<complete|partial>.json`，先核对 complete 与当前原件报告中真实密文子集（来源 media ID/index 一致），不要要求明文视频也带解密 token。以创建时即0600的临时文件和0700目录接收；浏览器先落 Downloads 时立即受限搬移并删除原下载，不能放课程 raw 或技能包。
 
 最小输入：`{"videos":[{"lesson_id":"source id","token":"current media token"}]}`。只报告数量、状态、类型/长度、哈希和验证结果。内层对象可留页面内存，不在 Console 展开。
 
@@ -37,7 +37,7 @@ python3 scripts/apply_decrypted_videos.py --apply
 
 当前经过验证的 AES 系统原语是 macOS CommonCrypto，另需 FFmpeg/FFprobe。其他系统先接入标准 AES block 原语并跑已知向量和真实前缀测试，不声称未经测试的平台已兼容。
 
-输出为 `assets/video/decrypted/<id>.mp4`，不覆盖原件或 Web MP4。已有结果只有输入/输出哈希及验证证据都匹配才复用。全部预期媒体通过独立审计后切换默认播放器，Web 来源保留备用。
+输出为 `assets/video/decrypted/<id>.mp4`，不覆盖原件或 Web MP4。已有结果只有输入/输出哈希及验证证据都匹配才复用。真实密文子集全部通过解密审计后，另核对明文原件与密文来源并集覆盖完整视频清单，再选择默认播放器。Web 更高画质可保持默认；同画质优先原件。video_decrypted_original 始终独立保留，不被 Web 默认覆盖。
 
 ## 验收
 
@@ -46,3 +46,5 @@ python3 scripts/apply_decrypted_videos.py --apply
 - 与独立 HLS 对照 H264 图片 VCL 与 AAC 压缩流，解释非图片 NAL 包装差异。
 - 独立核验真实变换来源绑定，不能把已有 HLS 文件冒充解密结果；无来源证据只证明候选可播。
 - 删除私有临时输入、重复下载及页面临时对象；确认没有进交付包。保留不含秘密值的来源、变换和独立核验报告。
+
+主音频、课程介绍音频或独立视频音轨应先按正常可用来源保存；不能因课内存在 v1 视频，把同课全部媒体强行套入此解密流程。标准 identity AES HLS 使用其清单资源密钥，并保留本地资源映射，不采用这里的私有 v1 token 算法。

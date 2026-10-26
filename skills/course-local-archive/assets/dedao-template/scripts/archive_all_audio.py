@@ -23,6 +23,7 @@ import threading
 import time
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
+from hls_assets import preserve_hls, audit_hls, audio_packet_proof
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORT_DIR = ROOT / "raw/audio-archive"
@@ -38,7 +39,7 @@ def digest(path):
 
 
 def relative(path):
-    return path.resolve().relative_to(ROOT).as_posix()
+    return path.resolve().relative_to(ROOT.resolve()).as_posix()
 
 
 def write_json(path, data):
@@ -182,15 +183,21 @@ def validate(path, expected, timeout, cached=None):
     if not path.is_file() or not path.stat().st_size:
         raise ValueError("Local audio file is absent or empty")
     sha256 = digest(path)
-    if cached and cached.get("status") == "complete" and cached.get("sha256") == sha256 and cached.get("full_decode_exit_code") == 0:
+    if cached and cached.get("status") == "complete" and cached.get("sha256") == sha256 and cached.get("full_decode_exit_code") == 0 and cached.get('validation_schema_version') == 2 and cached.get('all_audio_streams_decoded') is True and cached.get('full_decode', {}).get('reached_eof') is True:
         metadata = cached["ffprobe"]
+        probe_stderr = cached.get('ffprobe_stderr', '')
+        decode_evidence = cached['full_decode']
         reused_validation = True
     else:
-        probe = command(["ffprobe", "-v", "error", "-show_entries", "format=duration,size,format_name:stream=codec_name,sample_rate,channels,duration", "-of", "json", str(path)], min(timeout, 60))
+        probe = command(["ffprobe", "-v", "error", "-protocol_whitelist", "file,crypto,data", "-show_entries", "format=duration,size,format_name:stream=index,codec_type,codec_name,sample_rate,channels,duration", "-of", "json", str(path)], min(timeout, 60))
         metadata = json.loads(probe.stdout)
-        if not metadata.get("streams"):
+        probe_stderr = public_error(probe.stderr)
+        if not any(stream.get('codec_type') == 'audio' for stream in metadata.get("streams", [])):
             raise ValueError("No audio stream was found")
-        command(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-xerror", "-err_detect", "explode", "-i", str(path), "-map", "0:a:0", "-f", "null", "-"], timeout)
+        decoded = command(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-xerror", "-err_detect", "explode", "-protocol_whitelist", "file,crypto,data", "-i", str(path), "-map", "0:a", "-progress", "pipe:1", "-nostats", "-f", "null", "-"], timeout)
+        reached_eof = 'progress=end' in decoded.stdout.splitlines()
+        if not reached_eof: raise ValueError('Audio decoder did not report end of file')
+        decode_evidence = {'returncode':decoded.returncode, 'stderr':public_error(decoded.stderr), 'mapped_audio_streams':'all', 'reached_eof':reached_eof}
         reused_validation = False
     actual = duration_seconds(metadata.get("format", {}).get("duration"))
     if not actual:
@@ -199,13 +206,14 @@ def validate(path, expected, timeout, cached=None):
     tolerance = max(3.0, expected * 0.02) if expected else None
     if difference is not None and difference > tolerance:
         raise ValueError(f"Audio duration mismatch: expected {expected:.3f}s, saved {actual:.3f}s, tolerance {tolerance:.3f}s")
-    return {"bytes": path.stat().st_size, "sha256": sha256, "duration_seconds": actual, "expected_duration_seconds": expected, "duration_difference_seconds": difference, "duration_check": "passed" if expected else "not_available", "ffprobe": metadata, "full_decode_exit_code": 0, "cached_validation_reused": reused_validation}
+    return {"bytes": path.stat().st_size, "sha256": sha256, "duration_seconds": actual, "expected_duration_seconds": expected, "duration_difference_seconds": difference, "duration_check": "passed" if expected else "not_available", "ffprobe": metadata, 'ffprobe_stderr':probe_stderr, 'full_decode':decode_evidence, "full_decode_exit_code": 0, "cached_validation_reused": reused_validation, 'validation_schema_version':2, 'all_audio_streams_decoded':True, 'audio_stream_count':sum(stream.get('codec_type') == 'audio' for stream in metadata.get('streams', []))}
 
 
 def download_direct(url, destination, timeout):
     started = time.monotonic()
     request = Request(url, headers={"User-Agent": "CourseLocalArchive/1.0"})
     with urlopen(request, timeout=min(timeout, 45)) as response, destination.open("wb") as output:
+        expected = int(response.headers.get('Content-Length') or 0) or None
         while True:
             if time.monotonic() - started > timeout:
                 raise TimeoutError("Media download exceeded its configured timeout.")
@@ -213,6 +221,8 @@ def download_direct(url, destination, timeout):
             if not chunk:
                 break
             output.write(chunk)
+    if expected is not None and destination.stat().st_size != expected:
+        raise ValueError('Original audio download Content-Length differs from actual bytes')
 
 
 def archive_media(job, report_dir, timeout, retries):
@@ -226,13 +236,21 @@ def archive_media(job, report_dir, timeout, retries):
     report_path = report_dir / "media" / (job["media_id"] + ".json")
     previous = json.loads(report_path.read_text()) if report_path.is_file() else None
     report = {"media_id": job["media_id"], "lesson_ids": job["lesson_ids"], "audio_alias_id": entry["audio_alias_id"], "source_url_sha256": hashlib.sha256(url.encode()).hexdigest(), "source_info_path": entry["source_info_path"], "label": entry["label"], "path": relative(target), "method": "original_bytes" if direct else "standard_hls_lossless_audio_remux", "persistent_key_files_saved": False}
+    if not direct:
+        report['hls'] = preserve_hls(url, ROOT, Path('raw/audio-hls') / job['media_id'], timeout=min(timeout, 60))
+        report['persistent_key_files_saved'] = bool(report['hls']['keys'])
+        report['raw_audio_hls_preservation'] = audit_hls(ROOT, report['hls'])
     # A prior successful file is still hashed on every run; a matching full-decode
     # report may avoid decoding it twice. Existing legacy files are decoded once.
     if target.is_file():
         try:
+            if direct and (not previous or previous.get('source_url_sha256') != report['source_url_sha256']):
+                raise ValueError('Original-byte audio reuse requires a current source URL fingerprint')
             if previous and previous.get("audio_alias_id") != entry["audio_alias_id"]:
                 raise ValueError("The saved audio alias differs from the requested alias")
             report.update(validate(target, entry["expected_duration_seconds"], timeout, previous))
+            if not direct:
+                report['hls_audio_packet_proof'] = audio_packet_proof(ROOT, report['hls'], target, timeout)
             report.update({"status": "complete", "attempts": 0, "download_reused": True})
             write_json(report_path, report)
             return report
@@ -246,9 +264,13 @@ def archive_media(job, report_dir, timeout, retries):
             if direct:
                 download_direct(url, temporary, timeout)
             else:
-                command(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-rw_timeout", "30000000", "-i", url, "-map", "0:a:0", "-vn", "-c:a", "copy", "-movflags", "+faststart", str(temporary)], timeout)
+                command(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-allowed_extensions", "ALL", "-protocol_whitelist", "file,crypto,data", "-i", str(ROOT / report['hls']['local_playlist_path']), "-map", "0:a", "-vn", "-c:a", "copy", "-movflags", "+faststart", str(temporary)], timeout)
             verification = validate(temporary, entry["expected_duration_seconds"], timeout)
+            if not direct:
+                report['hls_audio_packet_proof'] = audio_packet_proof(ROOT, report['hls'], temporary, timeout)
             temporary.replace(target)
+            if not direct:
+                report['hls_audio_packet_proof']['output_path'] = relative(target)
             report.update(verification)
             report.update({"status": "complete", "attempts": attempt + 1, "download_reused": False})
             write_json(report_path, report)
@@ -344,7 +366,7 @@ def run_download(input_path, report_dir, workers, timeout, retries, extra_path=N
             if expected and abs(media["duration_seconds"] - expected) > max(3.0, expected * 0.02):
                 errors.append("Shared audio alias has inconsistent expected duration metadata")
                 continue
-            tracks.append({"path": media["path"], "label": track["label"], "audio_alias_id": track["audio_alias_id"], "media_id": track["media_id"]})
+            tracks.append({"path": media["path"], "label": track["label"], "audio_alias_id": track["audio_alias_id"], "media_id": track["media_id"], "source_url_sha256":media["source_url_sha256"], "bytes":media["bytes"], "sha256":media["sha256"], "duration":media["duration_seconds"], "archive_report":relative(report_dir / "media" / (track["media_id"] + ".json"))})
         record["audio"] = tracks
         if tracks:
             record["status"] = "partial" if errors or entry["unresolved_audio_alias_ids"] else "complete"
@@ -367,12 +389,20 @@ def run_download(input_path, report_dir, workers, timeout, retries, extra_path=N
 
 
 def apply_manifest(report_dir, course_path):
+    from archive_state import course_lock
+    with course_lock(ROOT):
+        return _apply_manifest_locked(report_dir, course_path)
+
+
+def _apply_manifest_locked(report_dir, course_path):
     manifest_path = report_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_before = manifest_path.read_bytes()
+    manifest = json.loads(manifest_before)
     before = course_path.read_bytes()
     course = json.loads(before)
     lookup = {str(lesson["id"]): lesson for lesson in course["lessons"]}
     media = {item["media_id"]: item for item in manifest["media"]}
+    checked_media = set()
     for entry in manifest["lessons"]:
         if entry["lesson_id"] not in lookup:
             raise ValueError("Audio manifest contains a lesson absent from course.json")
@@ -380,15 +410,28 @@ def apply_manifest(report_dir, course_path):
         if entry["status"] in {"complete", "partial"}:
             for track in entry["audio"]:
                 item = media[track["media_id"]]
+                if item.get('status') != 'complete' or item.get('audio_alias_id') != track.get('audio_alias_id') or item.get('path') != track.get('path'):
+                    raise ValueError('Audio track differs from its completed alias/source report')
+                track.update(source_url_sha256=item['source_url_sha256'], bytes=item['bytes'], sha256=item['sha256'], duration=item['duration_seconds'], archive_report=relative(report_dir / 'media' / (item['media_id'] + '.json')))
+                if item['media_id'] in checked_media:
+                    continue
                 path = (ROOT / item["path"]).resolve()
                 if not path.is_relative_to(ROOT) or not path.is_file() or digest(path) != item["sha256"]:
                     raise ValueError("A verified audio file changed; refusing to apply the manifest")
+                if item.get('method') == 'standard_hls_lossless_audio_remux':
+                    if not item.get('hls'):
+                        raise ValueError('Old audio HLS reports require rerunning the downloader to preserve raw source objects')
+                    audit_hls(ROOT, item['hls'])
+                    packet = item.get('hls_audio_packet_proof', {})
+                    if item['hls'].get('source_url_sha256') != item.get('source_url_sha256') or packet.get('status') != 'passed' or packet.get('all_audio_packets_exact_match') is not True or packet.get('output_path') != item['path'] or packet.get('output_sha256') != item['sha256']:
+                        raise ValueError('Audio HLS/source-output packet proof is absent or not current')
+                checked_media.add(item['media_id'])
             lesson["audio"] = entry["audio"]
         elif entry["status"] == "no_audio":
             lesson["audio"] = []
         lesson["audio_status"] = "not_applicable" if entry["status"] == "no_audio" else entry["status"]
         lesson["audio_archive"] = {"report_path": relative(report_dir / "lessons" / (entry["lesson_id"] + ".json")), "audio_alias_id": entry["audio_alias_id"], "declared_audio_alias_ids": entry["declared_audio_alias_ids"], "unresolved_audio_alias_ids": entry["unresolved_audio_alias_ids"]}
-    if course_path.read_bytes() != before:
+    if course_path.read_bytes() != before or manifest_path.read_bytes() != manifest_before:
         raise RuntimeError("course.json changed during the merge; retry after the other import finishes")
     course.pop("audio_policy", None)
     write_json(course_path, course)

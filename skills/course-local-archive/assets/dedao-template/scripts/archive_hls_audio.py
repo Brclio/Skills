@@ -1,81 +1,66 @@
 #!/usr/bin/env python3
-"""Archive a media URL already returned by an authorized Dedao lesson response.
+"""Save one observed lesson audio using the same complete-source pipeline.
 
-Uses ffmpeg's standard HLS handling and copies the audio stream into M4A. No
-key discovery, guessing, credential extraction, or access-control bypass occurs.
-Signed playback URLs and cryptographic key URLs are never printed.
+Finite HLS playlists, segments and standard identity AES keys are retained before
+offline lossless remuxing. This compatibility CLI merges only the primary track;
+the batch audio command remains preferable for main plus embedded alias sets.
 """
 from __future__ import annotations
-
 import argparse
 import hashlib
 import json
 from pathlib import Path
-import re
 import shutil
-import subprocess
 import sys
 
-from export_public import ROOT, write_json
-
-
-def public_error(value):
-    return re.sub(r"https?://[^\s\]\)\"']+", "[media URL redacted]", value)[-1600:]
+from archive_all_audio import ROOT, archive_media, public_error, write_json, unwrap, duration_seconds
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--lesson-id", required=True)
-    parser.add_argument("--info", type=Path, required=True, help="Saved authorized article/info response")
-    parser.add_argument("--timeout", type=int, default=120)
+    parser.add_argument('--lesson-id', required=True)
+    parser.add_argument('--info', type=Path, required=True, help='Saved authorized article/info response')
+    parser.add_argument('--timeout', type=int, default=300)
+    parser.add_argument('--retries', type=int, default=2)
     args = parser.parse_args()
-    if not args.lesson_id.isdigit():
-        parser.error("--lesson-id must be a numeric catalog ID")
-    info_path = args.info if args.info.is_absolute() else ROOT / args.info
-    response = json.loads(info_path.read_text())
-    info = response.get("c", response)
-    article = info.get("article_info", info)
-    if str(article.get("id", info.get("article_id", ""))) != args.lesson_id:
-        parser.error("The saved response does not match the requested lesson ID")
-    url = article.get("audio", {}).get("mp3_play_url", "")
-    if not url.startswith("https://"):
-        parser.error("The saved response contains no observed HTTPS audio URL")
-    ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
-    if not ffmpeg or not ffprobe:
-        parser.error("ffmpeg and ffprobe are required")
-    target = ROOT / "assets/audio" / (args.lesson_id + ".m4a")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    report = {"lesson_id": args.lesson_id, "source_info_path": info_path.relative_to(ROOT).as_posix(), "method": "standard_hls_lossless_audio_remux", "path": target.relative_to(ROOT).as_posix(), "persistent_key_files_saved": False}
-    try:
-        if not target.is_file() or not target.stat().st_size:
-            temporary = target.with_suffix(".part.m4a")
-            result = subprocess.run([ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", url, "-vn", "-c:a", "copy", "-movflags", "+faststart", str(temporary)], capture_output=True, text=True, timeout=args.timeout)
-            if result.returncode:
-                raise RuntimeError(public_error(result.stderr))
-            temporary.replace(target)
-        probe = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration,size:stream=codec_name,sample_rate,channels", "-of", "json", str(target)], capture_output=True, text=True, timeout=30)
-        if probe.returncode:
-            raise RuntimeError(public_error(probe.stderr))
-        metadata = json.loads(probe.stdout)
-        decode = subprocess.run([ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", str(target), "-f", "null", "-"], capture_output=True, text=True, timeout=args.timeout)
-        if decode.returncode:
-            raise RuntimeError(public_error(decode.stderr))
-        report.update({"status": "complete", "bytes": target.stat().st_size, "sha256": hashlib.sha256(target.read_bytes()).hexdigest(), "ffprobe": metadata, "full_decode_exit_code": decode.returncode})
-        course_path = ROOT / "course.json"
-        course = json.loads(course_path.read_text())
-        for lesson in course["lessons"]:
-            if lesson["id"] == args.lesson_id:
-                lesson["audio"] = [{"path": report["path"], "label": article.get("audio", {}).get("title") or lesson["title"]}]
-                lesson["audio_status"] = "complete"
-        course.pop("audio_policy", None)
-        write_json(course_path, course)
+    if not args.lesson_id.isdigit() or args.timeout <= 0 or not 0 <= args.retries <= 3:
+        parser.error('Use a numeric catalog ID, positive timeout and 0–3 retries')
+    info_path = (args.info if args.info.is_absolute() else ROOT / args.info).resolve()
+    if not info_path.is_relative_to(ROOT) or not info_path.is_file():
+        parser.error('Saved lesson info must be inside this course')
+    info = unwrap(json.loads(info_path.read_text()))
+    article = info.get('article_info', info)
+    if str(article.get('id', info.get('article_id', ''))) != args.lesson_id:
+        parser.error('The saved response does not match the requested lesson ID')
+    audio = article.get('audio') or {}
+    url = audio.get('mp3_play_url') or ''
+    if not url.startswith(('http://','https://')):
+        parser.error('The saved response contains no observed HTTP(S) audio URL')
+    if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
+        parser.error('ffmpeg and ffprobe are required')
+    alias = str(audio.get('alias_id') or '')
+    identity = alias or url
+    entry = {'lesson_id':args.lesson_id,'audio_alias_id':alias,'_url':url,'label':audio.get('title') or article.get('title') or args.lesson_id,'expected_duration_seconds':duration_seconds(audio.get('duration')),'source_info_path':info_path.relative_to(ROOT).as_posix()}
+    job = {'entry':entry,'media_id':hashlib.sha256(identity.encode()).hexdigest()[:24],'filename_stem':args.lesson_id,'lesson_ids':[args.lesson_id]}
+    report = archive_media(job, ROOT/'raw/audio-archive', args.timeout, args.retries)
+    if report.get('status') == 'complete':
+        from archive_state import course_lock
+        with course_lock(ROOT):
+            path = ROOT/'course.json';before=path.read_bytes();course=json.loads(before)
+            lessons=[lesson for lesson in course['lessons'] if str(lesson['id'])==args.lesson_id]
+            if len(lessons)!=1: raise ValueError('The requested lesson is not unique in course.json')
+            lesson=lessons[0]
+            preserved=[track for track in lesson.get('audio',[]) if track.get('audio_alias_id') != alias and Path(track.get('path','')).stem != args.lesson_id]
+            lesson['audio']=[{'path':report['path'],'label':entry['label'],'audio_alias_id':alias,'source_url_sha256':report['source_url_sha256'],'bytes':report['bytes'],'sha256':report['sha256'],'duration':report['duration_seconds'],'archive_report':'raw/audio-archive/media/'+job['media_id']+'.json'}]+preserved
+            lesson['audio_status']='complete';course.pop('audio_policy',None)
+            if path.read_bytes()!=before: raise ValueError('Course manifest changed while merging primary audio')
+            write_json(path,course)
+    write_json(ROOT/'raw'/('audio-'+args.lesson_id+'-report.json'),report)
+    print(json.dumps(report,ensure_ascii=False))
+    return 0 if report.get('status')=='complete' else 1
+
+
+if __name__ == '__main__':
+    try: raise SystemExit(main())
     except Exception as error:
-        report.update({"status": "failed", "error": public_error(str(error))})
-    write_json(ROOT / "raw" / f"audio-{args.lesson_id}-report.json", report)
-    print(json.dumps(report, ensure_ascii=False))
-    if report["status"] != "complete":
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
+        print(public_error(error),file=sys.stderr);raise SystemExit(1)

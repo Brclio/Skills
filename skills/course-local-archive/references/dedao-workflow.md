@@ -20,7 +20,7 @@ python3 scripts/export_public.py
 | `/pc/bauhinia/pc/class/info` | `{detail_id:course_enid,is_login:0}` → class_info、chapter_list、讲数和介绍 |
 | `/pc/bauhinia/pc/class/free_article_list` | `{detail_id,chapter_id,count:0,max_id:0,max_order_num:0}` → 每章 article_list |
 
-已验证版本 `count:0` 返回整章，仍须核对来源计数。出现分页/截断时，按当前响应分页语义补齐，不能把首批当完整。
+先请求 `count:0`，仍核对来源计数与 has_more；有分页时沿当前返回的 ID/order 游标补齐。无 chapter_list 的平铺课程使用已观察的 chapter_id=0 路径。游标不前进、重复身份冲突、数量不符或首批截断均失败，不能把首批当完整。
 
 ## 登录页面内导出
 
@@ -56,10 +56,19 @@ python3 scripts/link_local_audio.py
 python3 scripts/link_local_audio.py --check
 python3 scripts/archive_video.py
 python3 scripts/archive_web_video.py --input raw/authorized-web-media.json
+python3 scripts/archive_web_video.py --apply-only
 ```
 
 以脚本 `--help` 的真实选项执行媒体合并，等相关下载/导入完成后再写共享清单。音频下载器的 `-vn` 不能用来保存视频。
 
 最高画质对照所有实际返回的 resolution 与 FFprobe 宽高。`is_drm:true` 不意味着所有播放线路都加密，下载成功不代表可播。HLS 保存全部分片和本地播放清单；`formats[].size` 可能只是 m3u8 大小，不是最终视频体积。显式保留画面和音轨并 `-c copy`，不重编码。
 
-字幕、原文附件和外部 PDF 按明确来源保存，失效引用单独记录。`review_web_videos.py` 复核所有输出及来源分片，对首/中/末完整解码；`audit_archive.py` 核对当前目录、原文、媒体证据与网页依赖。
+媒体下载后运行来源资源清单与补充资源工具（见脚本 `--help`），补齐 metadata.class_video、字幕各版本和没有主音频 alias 的独立视频音轨。课程介绍 items/new_items 内 img 也下载并替换本地引用。额外音频导出仍按准确 alias 匹配，不把派生视频音轨塞进主音频身份。
+
+视频合并/解密后运行 `python3 scripts/link_local_video.py` 及 `--check`，保持正文视频原位与来源 media ID 对应；音频同理使用 link_local_audio。字幕、附件和外部 PDF 按明确来源保存，失效引用单独记录。`review_web_videos.py` 独立复核输出/分片与样本，全面核查另用 `audit_archive.py --mode fresh` 解码全部媒体，流程见 [verification-delivery.md](verification-delivery.md)。
+
+## 全部已购与批处理
+
+从当前已购页面枚举课程与分页，保存每课真实 ID/标题/来源 URL 和 inventory 完整性；不能将本地已有文件夹当成已购总清单。课程清单枚举未完成时总任务保持 partial。每课独立来源导出与目录、独立恢复点；付费访问仍仅使用当前已登录获准页面。
+
+浏览器 helper 以获准工具支持的页面函数执行，不能把字符串 eval、直接读取浏览器内部状态、另起未授权 CDP/Playwright 作为连接超时的绕路。连接恢复后先读取一个小状态确认，再做有界批次和检查点。下载/验证可跨课并行，每课清单单写者；本地 batch runner 的界限与交付要求见 [verification-delivery.md](verification-delivery.md)。

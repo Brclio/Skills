@@ -9,12 +9,53 @@ import json
 from pathlib import Path
 import re
 from urllib.parse import quote, unquote, urlsplit
+from media_inventory import canonical, content_manifest_digest, digest
 
 ROOT = Path(__file__).resolve().parents[1]
-VOID = {"br", "hr", "img", "source", "wbr", "col"}
-ALLOWED = set("a abbr address article aside audio b bdi bdo blockquote br caption cite code col colgroup dd del details div dl dt em figcaption figure h1 h2 h3 h4 h5 h6 hr i img kbd li main mark ol p pre q s samp section small source span strong sub summary sup table tbody td tfoot th thead time tr u ul video wbr".split())
+VOID = {"br", "hr", "img", "source", "track", "wbr", "col"}
+ALLOWED = set("a abbr address article aside audio b bdi bdo blockquote br caption cite code col colgroup dd del details div dl dt em figcaption figure h1 h2 h3 h4 h5 h6 hr i img kbd li main mark ol p pre q s samp section small source span strong sub summary sup table tbody td tfoot th thead time tr track u ul video wbr".split())
 BLOCKED = {"script", "style", "head", "iframe", "object", "embed", "form", "button", "input", "textarea", "select", "template", "svg", "math"}
-ATTRS = {"alt", "title", "width", "height", "colspan", "rowspan", "scope", "datetime", "start", "reversed", "type", "controls", "preload", "loop", "muted", "playsinline", "poster", "src", "href", "id", "class", "style", "lang", "dir", "open", "data-dedao-link", "data-source-url", "data-link-resolution"}
+ATTRS = {"alt", "title", "width", "height", "colspan", "rowspan", "scope", "datetime", "start", "reversed", "type", "controls", "preload", "loop", "muted", "playsinline", "poster", "src", "href", "id", "class", "style", "lang", "dir", "open", "download", "kind", "srclang", "label", "default", "data-video-index", "data-dedao-link", "data-source-url", "data-link-resolution"}
+BOOLEAN_ATTRS = {"controls", "loop", "muted", "playsinline", "open", "download", "default", "reversed"}
+
+
+def asset_versions(root):
+    return {"app_js": digest(root / "web/app.js"), "app_css": digest(root / "web/app.css")}
+
+
+def versioned_template(root):
+    versions = asset_versions(root)
+    template = (root / "web/template.html").read_text(encoding="utf-8")
+    # Migrate an older copied template as well as the current placeholders.
+    template = re.sub(r'web/app\.css(?:\?[^"\s]*)?', 'web/app.css?v=' + versions['app_css'], template)
+    template = re.sub(r'web/app\.js(?:\?[^"\s]*)?', 'web/app.js?v=' + versions['app_js'], template)
+    return template, versions
+
+
+def runtime_tracks(items, sources, *, default_label, kind="audio"):
+    """Only display fields enter the browser; proof and source files stay on disk."""
+    if isinstance(items, (dict, str)):
+        items = [items]
+    result = []
+    for original in items or []:
+        track = {"path": original} if isinstance(original, str) else original
+        path = sources.url(track.get("path") or track.get("url") or "", sources.root, media=True)
+        if not path:
+            continue
+        saved = {"path": path, "label": str(track.get("label", default_label))}
+        for key in ("duration", "resolution", "bytes", "sha256", "video_index", "source_media_id", "format", "preferred", "output_origin", "audio_alias_id"):
+            if key in track:
+                saved[key] = track[key]
+        if kind == "video" and track.get("poster"):
+            poster = sources.url(track["poster"], sources.root, media=True)
+            if poster:
+                saved["poster"] = poster
+        if track.get("encrypted_source"):
+            original = runtime_tracks([track["encrypted_source"]], sources, default_label="不可直接播放的源音频备份", kind="backup")
+            if original:
+                saved["encrypted_source"] = original[0]
+        result.append(saved)
+    return result
 
 
 def esc(value):
@@ -101,8 +142,12 @@ class SafeHTML(HTMLParser):
         clean = []
         missing = False
         for key, value in attrs:
-            if key not in ATTRS or value is None:
+            if key not in ATTRS:
                 continue
+            if value is None:
+                if key not in BOOLEAN_ATTRS:
+                    continue
+                value = key
             if key in {"src", "poster", "href"}:
                 value = self.sources.url(value, self.base, media=key != "href")
                 if value is None:
@@ -270,7 +315,7 @@ def build(root, manifest, output):
     lessons = []
     ids = set()
     for index, original in enumerate(course.get("lessons", [])):
-        lesson = dict(original)
+        lesson = {key: original[key] for key in ("id", "title", "section", "status", "source_url", "markdown_path", "html_path") if key in original}
         lesson["id"] = str(lesson.get("id", index + 1))
         if lesson["id"] in ids:
             raise ValueError(f"Duplicate lesson ID: {lesson['id']}")
@@ -295,23 +340,9 @@ def build(root, manifest, output):
         text_parser = PlainText(); text_parser.feed(lesson["html"])
         lesson["text"] = " ".join(text_parser.parts)
         for media_kind, default_label in (("audio", "课程音频"), ("video", "课程视频"), ("video_web_alternatives", "网页源 MP4")):
-            media_items = lesson.get(media_kind, []) or []
-            if isinstance(media_items, (str, dict)):
-                media_items = [media_items]
-            lesson[media_kind] = []
-            for track in media_items:
-                track = {"path": track} if isinstance(track, str) else dict(track)
-                path = sources.url(track.get("path") or track.get("url") or "", root, media=True)
-                if path:
-                    saved = {"path": path, "label": str(track.get("label", default_label))}
-                    for metadata_key in ("duration", "resolution", "bytes", "sha256", "archive_report", "decryption_status"):
-                        if metadata_key in track:
-                            saved[metadata_key] = track[metadata_key]
-                    if media_kind in {"video", "video_web_alternatives"} and track.get("poster"):
-                        poster = sources.url(track["poster"], root, media=True)
-                        if poster:
-                            saved["poster"] = poster
-                    lesson[media_kind].append(saved)
+            lesson[media_kind] = runtime_tracks(original.get(media_kind), sources, default_label=default_label, kind="video" if media_kind.startswith("video") else "audio")
+        lesson["video_audio_components"] = runtime_tracks(original.get("video_audio_components"), sources, default_label="视频音轨")
+        lesson["subtitles"] = runtime_tracks(original.get("subtitles"), sources, default_label="字幕", kind="subtitle")
         for key in ("markdown_path", "html_path"):
             if lesson.get(key):
                 source = sources.local_file(lesson[key])
@@ -320,11 +351,15 @@ def build(root, manifest, output):
     sources.lesson = ""
     cover = sources.url(course["cover_path"], root, media=True) if course.get("cover_path") else None
     data = {"title": course.get("title", "本地课程库"), "source_url": course.get("source_url", ""), "description": course.get("description", ""), "cover_path": cover, "lessons": lessons, "issues": sources.issues}
-    data["summary"] = {"total": len(lessons), "imported": sum(x["imported"] for x in lessons), "audio": sum(len(x["audio"]) for x in lessons), "video": sum(len(x["video"]) for x in lessons), "issues": len(sources.issues)}
+    data["summary"] = {"total": len(lessons), "imported": sum(x["imported"] for x in lessons), "audio": sum(len(x["audio"]) + len(x["video_audio_components"]) for x in lessons), "video": sum(len(x["video"]) for x in lessons), "issues": len(sources.issues)}
+    template, versions = versioned_template(root)
+    data.update(source_manifest_sha256=digest(manifest), content_manifest_sha256=content_manifest_digest(course), asset_versions=versions)
+    import hashlib
+    data["reader_payload_sha256"] = hashlib.sha256(canonical(data)).hexdigest()
     payload = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
-    template = (root / "web/template.html").read_text(encoding="utf-8")
     output.write_text(template.replace("__COURSE_TITLE__", esc(data["title"])).replace("__COURSE_DATA__", payload), encoding="utf-8")
-    report = {"summary": data["summary"], "issues": sources.issues}
+    report = {key: data[key] for key in ("summary", "issues", "source_manifest_sha256", "content_manifest_sha256", "asset_versions", "reader_payload_sha256")}
+    report["output_sha256"] = digest(output)
     (root / "web/build-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"output": str(output), **report}, ensure_ascii=False, indent=2))
 

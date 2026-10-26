@@ -7,7 +7,8 @@ from html.parser import HTMLParser
 import json
 from urllib.parse import unquote, urlsplit
 
-from build_site import ROOT, Sources, esc, markdown, sanitize
+from build_site import ROOT, Sources, esc, markdown, sanitize, runtime_tracks, versioned_template
+from media_inventory import digest
 
 
 class ResourceHTML(HTMLParser):
@@ -18,7 +19,7 @@ class ResourceHTML(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
-        if tag in {"img", "audio", "video", "source", "script"} and attrs.get("src"):
+        if tag in {"img", "audio", "video", "source", "track", "script"} and attrs.get("src"):
             self.resources.append(attrs["src"])
         if tag == "video" and attrs.get("poster"):
             self.resources.append(attrs["poster"])
@@ -35,7 +36,27 @@ def main():
     sources = Sources(ROOT)
     sources.lesson = "course-information"
     body = sanitize(markdown(source.read_text(encoding="utf-8")), sources, source.parent)
-    template = (ROOT / "web/template.html").read_text(encoding="utf-8")
+    subtitles = runtime_tracks(course.get("course_intro_subtitles"), sources, default_label="介绍字幕", kind="subtitle")
+    video = runtime_tracks(course.get("course_intro_video"), sources, default_label="课程介绍视频", kind="video")
+    audio = runtime_tracks(course.get("course_intro_audio"), sources, default_label="课程介绍音频")
+    supplements = []
+    # Generated supplemental controls do not alter the preserved introduction MD.
+    for track in video:
+        vtts = [s for s in subtitles if s.get("format") == "vtt"]
+        preferred = next((s for s in vtts if s.get("preferred")), vtts[0] if vtts else None)
+        captions = ''.join('<track kind="subtitles" srclang="zh" label="'+esc(s['label'])+'" src="'+esc(s['path'])+'"'+(' default' if s is preferred else '')+'>' for s in vtts)
+        supplements.append('<div class="video-track"><label>课程介绍视频</label><video controls playsinline preload="none" src="'+esc(track['path'])+'"'+(' poster="'+esc(track['poster'])+'"' if track.get('poster') else '')+'>'+captions+'</video><p><a href="'+esc(track['path'])+'" download>下载课程介绍视频 ↓</a></p></div>')
+    for track in audio:
+        supplements.append('<p><a href="'+esc(track['path'])+'" download>下载课程介绍音频 ↓</a></p>')
+        # An intro video already plays the same sound; retain its independent file.
+        if not video:
+            supplements.append('<audio controls preload="none" src="'+esc(track['path'])+'"></audio>')
+        if track.get('encrypted_source'):
+            supplements.append('<p><a href="'+esc(track['encrypted_source']['path'])+'" download>介绍音频源备份（不可直接播放） ↓</a></p>')
+    supplements.extend('<p><a href="'+esc(s['path'])+'" download>下载 '+esc(s.get('format','字幕').upper())+' 介绍字幕 ↓</a></p>' for s in subtitles)
+    if supplements:
+        body += '<section class="course-intro-media" aria-label="课程介绍本地媒体"><h2>课程介绍媒体与字幕</h2>'+''.join(supplements)+'</section>'
+    template, versions = versioned_template(ROOT)
     head = template.split("<body>", 1)[0]
     head = head.replace("__COURSE_TITLE__", esc("课程信息 · " + course.get("title", "本地课程库")))
     head = head.replace("</head>", """  <style>
@@ -57,7 +78,7 @@ def main():
     <article class="article-body">
 """ + body + """
     </article>
-    <footer class="reader-footer"><a href="content/%E8%AF%BE%E7%A8%8B%E4%BF%A1%E6%81%AF.md" download>下载 Markdown</a><span>阅读样式：<a href="https://github.com/Brclio/brclio-design-system">Brclio Design System</a></span><a href="index.html">课程目录</a></footer>
+    <footer class="reader-footer"><a href="content/%E8%AF%BE%E7%A8%8B%E4%BF%A1%E6%81%AF.md" download>下载 Markdown</a><a href="index.html">课程目录</a></footer>
   </main>
 </body>
 </html>
@@ -76,6 +97,8 @@ def main():
         "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
         "output": str(destination.relative_to(ROOT)),
         "output_sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
+        "source_manifest_sha256": digest(ROOT / "course.json"),
+        "asset_versions": versions,
         "issues": sources.issues,
         "resources": checks,
         "status": "passed" if not sources.issues and all(r["local"] and r["exists"] for r in checks) else "failed",

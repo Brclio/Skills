@@ -8,6 +8,7 @@ Only source-returned URLs are used. No alternate-path discovery is performed.
 from __future__ import annotations
 
 import argparse
+import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
@@ -20,6 +21,7 @@ import urllib.parse
 import urllib.request
 
 from archive_config import expected_video_lesson_ids
+from hls_assets import preserve_hls, audit_hls
 
 ROOT = Path(__file__).resolve().parent.parent
 REPORT = ROOT / "raw/web-video-archive-report.json"
@@ -88,61 +90,10 @@ def command(args, timeout=900):
 
 
 def localize_playlist(folder, source_url):
-    assets_path = folder / "assets.json"
-    old = json.loads(assets_path.read_text()) if assets_path.exists() else []
-    previous = {entry["source_url"]: entry for entry in old}
-    assets = []
-    source = download(source_url, folder / "source.m3u8", previous.get(source_url))
-    assets.append(source)
-    text = (folder / "source.m3u8").read_text(encoding="utf-8-sig")
-    if not text.startswith("#EXTM3U"):
-        raise ValueError("Source did not return a standard HLS playlist")
-    if "#EXT-X-STREAM-INF" in text:
-        raise ValueError("Expected returned format to be a media playlist, received a master playlist")
-    if "#EXT-X-BYTERANGE" in text:
-        raise ValueError("Byte-range HLS requires explicit local range handling")
-    if 'METHOD=SAMPLE-AES' in text or 'KEYFORMAT=' in text:
-        raise ValueError("Source HLS uses a protected format beyond standard AES-128")
-    durations = [float(x) for x in re.findall(r"#EXTINF:([0-9.]+)", text)]
-    encryption_methods = sorted(set(re.findall(r"#EXT-X-KEY:METHOD=([^,\r\n]+)", text)))
-    names = set()
-    saved = {}
-
-    def local_resource(uri, kind="segment"):
-        url = urllib.parse.urljoin(source_url, uri)
-        if url in saved:
-            return saved[url]
-        name = Path(urllib.parse.urlparse(uri).path).name
-        if not re.fullmatch(r"[a-zA-Z0-9_.-]+", name or "") or name in names or name in {"source.m3u8", "local.m3u8", "assets.json", "ffprobe.json"}:
-            extension = Path(name).suffix if name else (".key" if kind == "key" else ".ts")
-            name = kind + "-" + hashlib.sha256(url.encode()).hexdigest()[:16] + extension
-        names.add(name)
-        metadata = download(url, folder / name, previous.get(url))
-        metadata["kind"] = kind
-        assets.append(metadata)
-        # Persist after each resource so rerunning resumes verified resources.
-        write_json(assets_path, assets)
-        saved[url] = name
-        return name
-
-    lines = []
-    segment_count = 0
-    for line in text.splitlines():
-        if line.startswith("#") and 'URI="' in line:
-            kind = "key" if line.startswith("#EXT-X-KEY") else "initialization"
-            line = re.sub(r'URI="([^\"]+)"', lambda match: 'URI="' + local_resource(match.group(1), kind) + '"', line)
-        elif line and not line.startswith("#"):
-            line = local_resource(line.strip())
-            segment_count += 1
-        lines.append(line)
-    if not segment_count or not durations or "#EXT-X-ENDLIST" not in text:
-        raise ValueError("Source playlist was incomplete or not a finite VOD")
-    if segment_count != len(durations):
-        raise ValueError("HLS segment/duration count mismatch")
-    local = folder / "local.m3u8"
-    local.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    write_json(assets_path, assets)
-    return {"source_playlist": source, "local_playlist_path": local.relative_to(ROOT).as_posix(), "local_playlist_sha256": digest(local), "assets_manifest_path": assets_path.relative_to(ROOT).as_posix(), "segments": segment_count, "segment_bytes": sum(a["bytes"] for a in assets if a.get("kind") == "segment"), "playlist_duration": sum(durations), "encryption_methods": encryption_methods}
+    report = preserve_hls(source_url, ROOT, folder, timeout=90)
+    rows = json.loads((ROOT / report['assets_manifest_path']).read_text())
+    report['segment_bytes'] = sum(row['bytes'] for row in rows if row['kind'] == 'segment')
+    return report
 
 
 def archive(item, old):
@@ -159,7 +110,7 @@ def archive(item, old):
         target.parent.mkdir(parents=True, exist_ok=True)
         if not (old and old.get("source_url") == form["url"] and verified_existing(target, old)):
             temporary = target.with_suffix(".part.mp4")
-            mux = command(["ffmpeg", "-nostdin", "-y", "-v", "error", "-allowed_extensions", "ALL", "-i", str(ROOT / result["hls"]["local_playlist_path"]), "-map", "0:v", "-map", "0:a", "-c", "copy", "-movflags", "+faststart", str(temporary)], timeout=600)
+            mux = command(["ffmpeg", "-nostdin", "-y", "-v", "error", "-allowed_extensions", "ALL", "-protocol_whitelist", "file,crypto,data", "-i", str(ROOT / result["hls"]["local_playlist_path"]), "-map", "0:v", "-map", "0:a", "-c", "copy", "-movflags", "+faststart", str(temporary)], timeout=600)
             result["remux"] = {"returncode": mux["returncode"], "stderr": mux["stderr"], "codec_mode": "copy", "mapping": ["0:v", "0:a"]}
             if mux["returncode"] != 0:
                 raise ValueError("Lossless HLS remux failed: " + mux["stderr"][:1500])
@@ -175,9 +126,10 @@ def archive(item, old):
         audio = [s for s in probe_data["streams"] if s["codec_type"] == "audio"]
         if not video or not audio:
             raise ValueError("Output lacks a required video or audio stream")
-        decode = command(["ffmpeg", "-nostdin", "-v", "error", "-xerror", "-i", str(target), "-map", "0:v", "-map", "0:a", "-f", "null", "-"])
-        result["decode"] = {"returncode": decode["returncode"], "stderr": decode["stderr"], "mapping": ["0:v", "0:a"]}
-        if decode["returncode"] != 0:
+        decode = command(["ffmpeg", "-nostdin", "-v", "error", "-xerror", "-err_detect", "explode", "-protocol_whitelist", "file,crypto,data", "-i", str(target), "-map", "0:v", "-map", "0:a", "-progress", "pipe:1", "-nostats", "-f", "null", "-"])
+        eof = "progress=end" in decode["stdout"].splitlines()
+        result["decode"] = {"returncode": decode["returncode"], "stderr": decode["stderr"], "mapping": ["0:v", "0:a"], "all_audio_video_streams": decode["returncode"] == 0 and eof, "reached_eof": eof, "err_detect":"explode"}
+        if decode["returncode"] != 0 or not eof:
             raise ValueError("Complete video/audio decoding failed: " + decode["stderr"][:1500])
         duration = float(probe_data["format"]["duration"])
         difference = abs(duration - result["hls"]["playlist_duration"])
@@ -188,50 +140,100 @@ def archive(item, old):
             raise ValueError(f"Duration differs from source ({duration}/{source_duration})")
         if max(s.get("height", 0) for s in video) < int(form.get("resolution", 0)):
             raise ValueError("Output has less resolution than the selected source format")
-        result.update({"status": "complete", "playable": True, "download_complete": True, "path": target.relative_to(ROOT).as_posix(), "bytes": target.stat().st_size, "sha256": digest(target), "duration": duration, "duration_difference_from_playlist": difference, "probe": {"returncode": 0, "data": probe_data}, "video_stream_count": len(video), "audio_stream_count": len(audio), "all_streams_decoded": True, "conversion": "lossless_remux"})
+        result.update({"status": "complete", "playable": True, "download_complete": True, "path": target.relative_to(ROOT).as_posix(), "bytes": target.stat().st_size, "sha256": digest(target), "duration": duration, "duration_difference_from_playlist": difference, "probe": {"returncode": 0, "stderr":probe["stderr"], "data": probe_data}, "video_stream_count": len(video), "audio_stream_count": len(audio), "all_streams_decoded": True, "conversion": "lossless_remux"})
     except Exception as error:
         result["error"] = f"{type(error).__name__}: {error}"
     log(f"web video {lid}: {result['status']} {result.get('bytes', 0):,} bytes")
     return result
 
 
+def _current_track(track):
+    value = track.get('path', '')
+    path = (ROOT / value).resolve()
+    return bool(value and path.is_relative_to(ROOT.resolve()) and verified_existing(path, track))
+
+
+def _decrypted_tracks(lesson, lid, evidence):
+    candidates = lesson.get('video_decrypted_original') or [track for track in lesson.get('video', []) if track.get('path') == f'assets/video/decrypted/{lid}.mp4']
+    result = []
+    for track in candidates:
+        rows = [row for row in evidence if str(row.get('lesson_id')) == lid and row.get('path') == track.get('path')]
+        if len(rows) != 1: raise ValueError('Retained decrypted original lacks unique verification evidence')
+        row = rows[0]
+        source = {'path':row.get('source_path'),'bytes':row.get('source_bytes'),'sha256':row.get('source_sha256')}
+        if not (_current_track(track) and _current_track(source) and track.get('path') == f'assets/video/decrypted/{lid}.mp4' and row.get('source_path') == f'assets/video/encrypted/{lid}.mp4.enc' and row.get('decode',{}).get('err_detect') == 'explode' and row.get('status') == 'decrypted_verified' and row.get('sha256') == track.get('sha256') and row.get('bytes') == track.get('bytes') and row.get('source_bytes') == row.get('bytes') and row.get('original_unchanged') is True and row.get('conversion') == 'exact_native_cipher_transform_without_remux' and row.get('probe',{}).get('returncode') == 0 and row.get('decode',{}).get('returncode') == 0 and row.get('decode',{}).get('all_audio_video_streams') is True and row.get('normalized_stream_comparison',{}).get('exact_vcl_and_audio_match') is True):
+            raise ValueError('Retained decrypted original differs from verified source/transform evidence')
+        result.append(copy.deepcopy(track))
+    return result
+
+
 def apply_report():
-    report = json.loads(REPORT.read_text())
-    records = {str(v["lesson_id"]): v for v in report["videos"]}
-    if len(records) != report["expected_video_count"] or not all(v.get("status") == "complete" and v.get("playable") and v.get("all_streams_decoded") for v in records.values()):
-        raise ValueError("Only a complete, fully decoded video report may be applied")
-    for video in records.values():
-        if not verified_existing(ROOT / video["path"], video):
-            raise ValueError("Output bytes no longer match the verified video report")
-    source = json.loads((ROOT / "raw/authorized-course.json").read_text())
-    expected_ids = {str(l["id"]) for l in source["lessons"] if (l.get("info", {}).get("article_info") or {}).get("video")}
-    if set(records) != expected_ids:
-        raise ValueError("Verified videos do not match the source's complete video lesson set")
-    original_report = ROOT / "raw/video-archive-report.json"
-    originals = {str(v["lesson_id"]): v for v in json.loads(original_report.read_text()).get("videos", [])} if original_report.exists() else {}
-    course = json.loads((ROOT / "course.json").read_text())
-    for lesson in course["lessons"]:
-        lid = str(lesson["id"])
-        record = records.get(lid)
-        if record:
-            poster = ""
-            if lesson.get("localized_info_path"):
-                info = json.loads((ROOT / lesson["localized_info_path"]).read_text())
-                videos = (info.get("article_info") or {}).get("video") or []
-                poster = videos[0].get("cover_img", "") if videos else ""
-            video = {"path": record["path"], "label": f"课程视频 · {record['resolution_selected']}p", "duration": record["duration"], "resolution": record["resolution_selected"], "bytes": record["bytes"], "sha256": record["sha256"], "archive_report": REPORT.relative_to(ROOT).as_posix()}
-            if poster and (ROOT / poster).is_file():
-                video["poster"] = poster
-            lesson["video"] = [video]
-            lesson["video_status"] = "complete"
-        else:
-            lesson["video"] = []
-            lesson["video_status"] = "not_applicable"
-        original = originals.get(lid)
-        if original and original.get("download_complete"):
-            lesson["video_encrypted_original"] = [{key: original[key] for key in ("path", "bytes", "sha256", "source_media_id", "source_url", "status") if key in original}]
-    write_json(ROOT / "course.json", course)
-    log(f"Applied {len(records)} verified videos; {len(course['lessons']) - len(records)} source lessons have no video")
+    from archive_state import course_lock, compare_and_write_manifest
+    with course_lock(ROOT):
+        watched = [ROOT/'course.json', REPORT, ROOT/'raw/authorized-course.json', ROOT/'raw/video-archive-report.json', ROOT/'raw/legacy-video-decryption-report.json', ROOT/'course-config.json']
+        before = {path:path.read_bytes() if path.exists() else None for path in watched}
+        course = json.loads(before[ROOT/'course.json'])
+        report = json.loads(before[REPORT])
+        rows = report.get('videos', [])
+        records = {str(v['lesson_id']):v for v in rows}
+        if len(records) != len(rows) or len(records) != report['expected_video_count'] or set(records) != expected_video_lesson_ids(course):
+            raise ValueError('Web video report must exactly cover the source-declared lesson set')
+        authorized = json.loads(before[ROOT/'raw/authorized-course.json'])
+        source_videos = {str(row['id']): (row.get('info',{}).get('article_info') or {}).get('video',[None])[0] for row in authorized['lessons'] if (row.get('info',{}).get('article_info') or {}).get('video')}
+        originals_list = json.loads(before[ROOT/'raw/video-archive-report.json']).get('videos', []) if before[ROOT/'raw/video-archive-report.json'] else []
+        originals = {str(v['lesson_id']):v for v in originals_list}
+        if len(originals) != len(originals_list): raise ValueError('Duplicate source video identities require a separate adapter')
+        decrypted_evidence = json.loads(before[ROOT/'raw/legacy-video-decryption-report.json']).get('videos', []) if before[ROOT/'raw/legacy-video-decryption-report.json'] else []
+        for lesson in course['lessons']:
+            lid = str(lesson['id']); record = records.get(lid)
+            if not record:
+                lesson['video'] = [];lesson['video_status'] = 'not_applicable'
+                continue
+            if not (record.get('status') == 'complete' and record.get('playable') and record.get('all_streams_decoded') and _current_track(record)):
+                raise ValueError('Only current complete fully decoded Web output may be applied')
+            audit_hls(ROOT,record.get('hls',{}))
+            poster = ''
+            if lesson.get('localized_info_path'):
+                info = json.loads((ROOT/lesson['localized_info_path']).read_text())
+                videos = (info.get('article_info') or {}).get('video') or []
+                poster = videos[0].get('cover_img','') if videos else ''
+            web = {'path':record['path'],'label':f"网页源 MP4 · {record['resolution_selected']}p",'duration':record['duration'],'resolution':record['resolution_selected'],'bytes':record['bytes'],'sha256':record['sha256'],'archive_report':REPORT.relative_to(ROOT).as_posix()}
+            if poster and (ROOT/poster).is_file(): web['poster'] = poster
+            lesson['video_web_alternatives'] = [web]
+            choices = [(int(web.get('resolution') or 0), 0, web)]
+            original = originals.get(lid)
+            if not original or not original.get('download_complete') or not _current_track(original):
+                raise ValueError('Current exact source original is required before applying Web output')
+            source_video = source_videos[lid]
+            current_source_url = source_video.get('bitrate_' + str(original.get('resolution_selected')))
+            if int(original.get('video_index',0)) != 0 or str(original.get('source_media_id','')) != str(source_video.get('dd_media_id_str') or source_video.get('dd_media_id') or '') or not current_source_url or original.get('source_url') != current_source_url:
+                raise ValueError('Original source URL/media ID/index differs from the authorized source')
+            track = {key:original[key] for key in ('path','bytes','sha256','source_media_id','source_url_sha256','video_index','status','source_role') if key in original}
+            track['archive_report'] = 'raw/video-archive-report.json'
+            if original.get('playable'):
+                streams = original.get('probe',{}).get('data',{}).get('streams',[])
+                if not (original['path'] == f'assets/video/original/{lid}.mp4' and original.get('source_role') == 'plaintext_original' and original.get('probe',{}).get('returncode') == 0 and original.get('decode',{}).get('returncode') == 0 and original.get('decode',{}).get('all_audio_video_streams') is True and any(s.get('codec_type') == 'audio' for s in streams) and any(s.get('codec_type') == 'video' for s in streams)):
+                    raise ValueError('Plaintext source must be independently verified in its dedicated original directory')
+                height = max(int(s.get('height') or 0) for s in streams if s.get('codec_type') == 'video')
+                track.update(label=f'明文原件 MP4 · {height}p', resolution=height, duration=original['duration'])
+                lesson['video_plaintext_original'] = [track]
+                lesson.pop('video_encrypted_original', None)
+                choices.append((height,1,track))
+            elif original.get('source_declares_drm') and original.get('source_role','encrypted_original') == 'encrypted_original' and original.get('status') == 'drm_source_saved_unplayable' and original['path'] == f'assets/video/encrypted/{lid}.mp4.enc':
+                lesson['video_encrypted_original'] = [track]
+                lesson.pop('video_plaintext_original', None)
+            else:
+                raise ValueError('Unclassified unplayable source cannot be counted as a verified ciphertext original')
+            decrypted = _decrypted_tracks(lesson,lid,decrypted_evidence)
+            if decrypted:
+                lesson['video_decrypted_original'] = decrypted
+                choices += [(int(t.get('resolution') or 0),2,t) for t in decrypted]
+            lesson['video'] = [max(choices,key=lambda item:(item[0],item[1]))[2]]
+            lesson['video_status'] = 'complete'
+        if any((path.read_bytes() if path.exists() else None) != value for path,value in before.items()):
+            raise ValueError('Manifest or source evidence changed while applying Web outputs')
+        compare_and_write_manifest(ROOT,hashlib.sha256(before[ROOT/'course.json']).hexdigest(),course)
+    log(f'Applied {len(records)} verified Web outputs with independent original roles')
 
 
 def main():

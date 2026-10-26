@@ -55,7 +55,20 @@ python3 scripts/apply_decrypted_videos.py
 python3 scripts/apply_decrypted_videos.py --apply
 ```
 
-默认合并命令仅检查。只有来源声明的全部视频均已验证、原件和结果哈希一致、完整音画解码及独立网页源内容对照通过后，`--apply` 才会更新默认视频。保留的网页源文件列在 `video_web_alternatives`，原始密文保持不变。
+默认合并命令仅检查。只有真实密文子集及来源明文/密文并集均已验证、原件和结果哈希一致、完整音画解码及独立网页源内容对照通过后，`--apply` 才会更新默认视频。明文、解密、网页及密文独立保存在 `video_plaintext_original`、`video_decrypted_original`、`video_web_alternatives`、`video_encrypted_original`；Web更高画质可默认，同画质优先原件。
+
+课程介绍、字幕及独立视频音轨补齐（默认下载/检查，显式合并）：
+
+```bash
+python3 scripts/media_inventory.py
+python3 scripts/archive_course_extras.py
+python3 scripts/archive_course_extras.py --apply
+python3 scripts/media_inventory.py --verify
+python3 scripts/link_local_video.py
+python3 scripts/link_local_video.py --check
+```
+
+HLS 先保存原清单、分片、适用标准AES密钥及本地URI映射，再从本地输入无损封装。主音频与额外 alias 不互换；独立音轨标注派生源。
 
 构建与检查：
 
@@ -63,13 +76,20 @@ python3 scripts/apply_decrypted_videos.py --apply
 python3 scripts/build_site.py
 python3 scripts/build_course_info.py
 python3 scripts/build_resources.py
-python3 scripts/audit_archive.py
+python3 scripts/audit_archive.py --mode fresh --audit-run-id <unique-run-id>
 python3 scripts/finalize_archive.py --apply
 python3 scripts/audit_archive.py
 ```
 
-`finalize_archive.py` 默认仅预览；显式 `--apply` 才更新 `course.json.archive_status` 和来源推导的统计。它要求一小时内通过的审计、同课目录与正文身份、当前输入及交付文件哈希全部匹配，并检查逐讲状态。审计后文件改变时先重新审计。原审计按 SHA 保存在 `raw/finalization-audits/`，完成后再次运行审计以绑定最终清单。
+`finalize_archive.py` 默认只读；`--apply` 仅标记 `local_verified`。增量核验只复用当前SHA匹配的完整证据；fresh重新解码全部图片帧及全部音视频流。中断续验只允许显式相同 run ID 加 `--resume-same-run`。核验保留完整stderr，不按课程ID或宽泛错误文本豁免。
 
-归档完成以实际文件、来源计数、哈希、完整解码和核验报告为准。课程没有提供的媒体与下载失败分开记录；无法访问的外部参考链接保留具体状态。
+使用 `serve.py` 启动支持Range的禁缓存本地服务，在获准浏览器中实测目录、首中末切换、搜索、字号、图片、音视频播放/拖动、字幕、介绍和下载。`observe_reader.py --print-browser-probe` 给出实际已加载payload和JS/CSS版本的被动读取表达式；把真实观察、逐项proofs和工具快照/截图保存在 `raw/qa/`。不能使用合成proof宣称实际UI通过。
+
+```bash
+python3 scripts/observe_reader.py --observation raw/qa/observation.json
+python3 scripts/verify_delivery.py
+```
+
+交付门仅写 `raw/delivery/status.json`，只有 `fully_delivered` 表示本地核验、来源资源清单和实际UI证据均通过。当前页面加载旧数据、缺资源或旧证明时失败，不改核心清单。移动时保留目录结构；无法实测或外部引用失效时如实记录。
 
 阅读器基于 [Brclio Design System](https://github.com/Brclio/brclio-design-system)，设计署名 Brclio（黄家宝），页面设计遵循 [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)。课程与媒体版权归各自作者。

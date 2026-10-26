@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Mark an archive complete only after a fresh audit of the current same-course inputs.
+"""Mark an archive locally verified after auditing the current same-course inputs.
 
-Default: validate and preview. --apply atomically writes the completed manifest.
-The auditor remains read-only; rerun it after finalization to bind the new file.
+Default: validate and preview. --apply atomically writes local_verified.
+Browser QA and verify_delivery.py separately establish complete delivery.
 """
 from __future__ import annotations
 import argparse
@@ -12,6 +12,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+
+from archive_state import course_lock, compare_and_write_manifest
+from audit_evidence import verify_bound_audit
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -37,8 +40,10 @@ def local_path(value):
 
 
 def prepare(report,course,audit_bytes,max_age):
-    if report.get('status')!='passed' or report.get('archive_status')!='complete' or report.get('errors')!=[] or report.get('summary',{}).get('errors')!=0:
+    if report.get('status')!='passed' or report.get('archive_status') not in {'complete','local_verified'} or report.get('errors')!=[] or report.get('summary',{}).get('errors')!=0:
         raise ValueError('A passed audit with an explicit empty errors array is required')
+    verify_bound_audit(ROOT,report)
+    if report.get('inventory',{}).get('status')!='passed':raise ValueError('A complete source-driven resource inventory is required')
     try:
         checked=datetime.fromisoformat(report['checked_at_utc'].replace('Z','+00:00'))
         age=(datetime.now(timezone.utc)-checked).total_seconds()
@@ -96,7 +101,7 @@ def prepare(report,course,audit_bytes,max_age):
     if any(row.get('status')!='imported' or row.get('text_integrity')!='verified' or row.get('images_status')!='complete' or row.get('audio_status') not in {'complete','not_applicable'} or row.get('video_status') not in {'complete','not_applicable'} for row in lessons):
         raise ValueError('Every lesson must have verified text, images and complete or inapplicable media')
     result=copy.deepcopy(course)
-    result['archive_status']='complete'
+    result['archive_status']='local_verified'
     result['archive_summary']={
         'lessons':count,
         'audio':sum(len(row.get('audio') or []) for row in lessons),
@@ -111,11 +116,11 @@ def prepare(report,course,audit_bytes,max_age):
     if result['archive_summary']['audio']!=int(summary.get('audio_track_references_verified',0)) or result['archive_summary']['video']!=int(summary.get('video_track_references_verified',0)):
         raise ValueError('Current media references do not match the audited totals')
     audit_sha=digest(audit_bytes)
-    result['archive_finalization']={'status':'complete','audit_path':'raw/finalization-audits/'+audit_sha+'.json','audit_checked_at_utc':report['checked_at_utc'],'audit_sha256':audit_sha,'audited_manifest_sha256':report['manifest_snapshot_sha256'],'source_archive_sha256':snapshots['source_archive']['sha256'],'source_catalog_sha256':snapshots['source_catalog']['sha256']}
+    result['archive_finalization']={'status':'local_verified','delivery_status':'pending_browser_qa','audit_path':'raw/finalization-audits/'+audit_sha+'.json','audit_checked_at_utc':report['checked_at_utc'],'audit_sha256':audit_sha,'audited_manifest_sha256':report['manifest_snapshot_sha256'],'source_archive_sha256':snapshots['source_archive']['sha256'],'source_catalog_sha256':snapshots['source_catalog']['sha256']}
     return result,bound,output_states
 
 
-def main():
+def _main_locked():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--audit',default='raw/archive-audit.json')
     parser.add_argument('--max-audit-age-seconds',type=int,default=3600)
@@ -132,16 +137,19 @@ def main():
         if (stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns)!=expected:
             raise ValueError('An audited output changed during finalization; audit again')
     if not args.apply:
-        print(json.dumps({'applied':False,'status':'ready','archive_status':'complete','summary':updated['archive_summary']},ensure_ascii=False));return 0
+        print(json.dumps({'applied':False,'status':'ready','archive_status':'local_verified','summary':updated['archive_summary']},ensure_ascii=False));return 0
     saved_audit=ROOT/updated['archive_finalization']['audit_path']
     saved_audit.parent.mkdir(parents=True,exist_ok=True)
     if saved_audit.exists() and saved_audit.read_bytes()!=audit_bytes:
         raise ValueError('The preserved audit snapshot differs from its expected SHA-256')
     if not saved_audit.exists():saved_audit.write_bytes(audit_bytes)
-    temporary=manifest.with_name('course.json.finalize-'+str(os.getpid()))
-    temporary.write_text(json.dumps(updated,ensure_ascii=False,indent=2)+'\n',encoding='utf-8');temporary.replace(manifest)
-    print(json.dumps({'applied':True,'archive_status':'complete','summary':updated['archive_summary'],'next_step':'Rerun audit_archive.py to bind the completed manifest'},ensure_ascii=False))
+    compare_and_write_manifest(ROOT,digest(before),updated)
+    print(json.dumps({'applied':True,'archive_status':'local_verified','summary':updated['archive_summary'],'next_step':'Rebuild reader/info/resources if needed, rerun local audit, then collect actual browser QA and run verify_delivery.py'},ensure_ascii=False))
     return 0
+
+
+def main():
+    with course_lock(ROOT):return _main_locked()
 
 
 if __name__=='__main__':

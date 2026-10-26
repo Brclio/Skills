@@ -19,10 +19,14 @@ import subprocess
 from urllib.parse import unquote,urlsplit
 
 from build_site import markdown
+from archive_state import atomic_json
+from audit_evidence import media_report_paths, is_post_final
+from audit_media import audit_media
+from media_inventory import load_inventory, verify_inventory, content_manifest_digest
 
 ROOT=Path(__file__).resolve().parents[1]
 IMAGE_FIELDS={'avatar','cover','cover_img','coverImg','poster','index_img','indexImg','icon','image','img','logo','article_logo','logo_iphonex','square_img','outline_img','player_img','lecturer_avatar','index_img_applet','special_logo','logo_for_lecture'}
-SUPPORTED={'paragraph','salutation','tip','date','wish','header','elite','list','image','inline-image','blockquote','hr','audio','label-group','code-block'}
+SUPPORTED={'paragraph','salutation','tip','date','wish','header','elite','list','image','inline-image','blockquote','hr','audio','label-group','code-block','video','product-item','vote'}
 FILE_SNAPSHOTS={}
 HASH_CACHE={}
 CHANGED_FILES=set()
@@ -30,7 +34,7 @@ EXCLUDED_FILES=set()
 
 def remember(path,digest,size):
     path=path.resolve()
-    if path in EXCLUDED_FILES or 'finalization-audits' in path.parts:return
+    if path in EXCLUDED_FILES or is_post_final(path.relative_to(ROOT)):return
     value={'path':path.relative_to(ROOT).as_posix(),'sha256':digest,'bytes':size}
     previous=FILE_SNAPSHOTS.get(value['path'])
     if previous and previous!=value:CHANGED_FILES.add(value['path'])
@@ -109,6 +113,10 @@ def expected_text(blocks,unknown):
         if kind=='audio':value=str(block.get('title',''))+str(block.get('desc',''))
         elif kind in {'image','inline-image'}:value=str(block.get('legend',''))
         elif kind=='hr':value=''
+        elif kind=='video':value=str(block.get('title',''))
+        elif kind=='product-item':
+            product=block.get('info') or {};value=''.join(str(product.get(key,'')) for key in ('title','des','price'))
+        elif kind=='vote':value=inline(block.get('contents',[]),unknown)
         elif kind=='label-group':value=' '.join(block.get('labels',[]))
         elif kind=='code-block':value=str(block.get('code',block.get('text','')))
         else:
@@ -129,7 +137,16 @@ def image_urls(value):
     return found
 
 def main():
-    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--archive',default='raw/authorized-course.json');parser.add_argument('--output',default='raw/archive-audit.json');parser.add_argument('--decode',action='store_true');parser.add_argument('--probe-media',action='store_true',help='Repeat FFprobe instead of using matching prior evidence');args=parser.parse_args()
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--archive',default='raw/authorized-course.json');parser.add_argument('--output',default='raw/archive-audit.json')
+    parser.add_argument('--decode',action='store_true',help='Compatibility alias for --mode fresh')
+    parser.add_argument('--mode',choices=('incremental','fresh'),default='incremental')
+    parser.add_argument('--probe-media',action='store_true',help='Repeat FFprobe while retaining matching full-decode evidence')
+    parser.add_argument('--audit-run-id');parser.add_argument('--resume-same-run',action='store_true')
+    parser.add_argument('--source-warning-review',help='Independent exact-byte source metadata warning review')
+    args=parser.parse_args()
+    if args.decode:args.mode='fresh'
+    if args.resume_same_run and (args.mode!='fresh' or not args.audit_run_id):parser.error('--resume-same-run requires --mode fresh --audit-run-id')
     EXCLUDED_FILES.add((ROOT/args.output).resolve())
     errors=[];warnings=[];summary=Counter();resource_checks=0;unknown=[];media_checks=[];lesson_checks=[]
     def fail(kind,**data):errors.append({'kind':kind,**data})
@@ -171,7 +188,7 @@ def main():
     if len({archive.get('course',{}).get('enid'),course.get('course_enid'),catalog.get('class_info',{}).get('enid')})!=1:fail('course_identity_mismatch')
     if not archive.get('complete',archive.get('summary',{}).get('complete')) or archive.get('errors'):fail('source_export_incomplete')
     local_lessons={str(row['id']):row for row in course.get('lessons',[])}
-    all_images=image_urls(archive.get('course',{}));expected_audio={};expected_video={}
+    all_images=image_urls(archive.get('course',{})) | {r['_url'] for r in load_inventory(ROOT,args.archive).get('resources',[]) if r.get('role') in {'image','course_intro_poster'} and r.get('_url')};expected_audio={};expected_video={}
     for source in archive.get('lessons',[]):
         lid=str(source['id']);lesson=local_lessons.get(lid)
         if lesson is None:continue
@@ -212,131 +229,26 @@ def main():
         summary['source_images_verified']+=valid
         if not valid:fail('source_image_missing_or_hash_mismatch',url_sha256=hashlib.sha256(url.encode()).hexdigest())
     summary['source_images_expected']=len(all_images)
-    # Records may live in a manifest or in per-media reports; keep only rows
-    # bearing a complete media hash and full-decode evidence.
-    evidence=defaultdict(list)
-    video_backup_report=load(ROOT/'raw/video-archive-report.json',{})
-    video_source_report=load(ROOT/'raw/web-video-archive-report.json',{})
-    video_source_rows=video_source_report.get('videos',[])
-    web_media=load(ROOT/'raw/authorized-web-media.json',{})
-    if not web_media.get('complete') or web_media.get('errors'):fail('authorized_web_media_export_incomplete')
-    web_by_lesson={str(row.get('lesson_id')):row for row in web_media.get('videos',[])}
-    if len(video_source_rows)!=sum(len(row) for row in expected_video.values()):fail('web_video_report_count_mismatch')
-    for row in video_source_rows:
-        source=web_by_lesson.get(str(row.get('lesson_id')),{});formats=[form for track in source.get('media',{}).get('tracks',[]) for form in track.get('formats',[]) if form.get('type')=='video' and form.get('format')=='m3u8' and form.get('url')]
-        largest=max([int(form.get('resolution',0)) for form in formats],default=0)
-        selected=[form for form in formats if form.get('url')==row.get('source_url') and int(form.get('resolution',0))==int(row.get('resolution_selected') or 0)]
-        if not selected or int(row.get('resolution_selected') or 0)!=largest or str(row.get('source_media_id'))!=str(source.get('source_media_id')):
-            fail('web_video_source_identity_or_resolution_mismatch',lesson_id=str(row.get('lesson_id')))
-        if row.get('status')=='complete' and (not row.get('all_streams_decoded') or not row.get('video_stream_count') or not row.get('audio_stream_count') or row.get('conversion')!='lossless_remux'):
-            fail('web_video_stream_decode_or_remux_evidence_inconsistent',lesson_id=str(row.get('lesson_id')))
-    video_source_lookup={(str(row.get('lesson_id')),str(row.get('source_media_id'))):row for row in video_source_rows}
-    for row in video_backup_report.get('videos',[]):
+    media_checks,media_run=audit_media(ROOT,course,expected_video,args,load,sha,fail,summary)
+    inventory=load_inventory(ROOT,args.archive)
+    inventory_audit=verify_inventory(ROOT,inventory,course)
+    if inventory_audit.get('status')!='passed':fail('source_inventory_incomplete',errors=inventory_audit.get('errors',[]))
+    for row in inventory_audit.get('resources',[]):
+        for value in row.get('paths',[]):
+            path=local(value)
+            if path and path.is_file():sha(path)
+    summary['expected_resources']=inventory_audit.get('expected_resources',0)
+    summary['verified_resources']=inventory_audit.get('verified_resources',0)
+    from verify_images import run_validation
+    image_validation=run_validation(ROOT,fresh=args.mode=='fresh',audit_run_id=media_run.run_id if media_run else None,resume_same_run=args.resume_same_run)
+    if image_validation.get('status') not in {'passed','passed_with_source_warnings'}:fail('source_image_decode_verification_failed',summary=image_validation.get('summary'))
+    image_proof=ROOT/'raw/image-verification.json'
+    if image_proof.is_file():sha(image_proof)
+    summary['images_decoded']=sum(row.get('all_frames_decoded') is True for row in image_validation.get('images',[]))
+    for row in image_validation.get('images',[]):
         path=local(row.get('path'))
-        valid=bool(path and path.is_file() and path.stat().st_size==row.get('bytes') and sha(path)==row.get('sha256'))
-        summary['historical_video_backups_verified']+=valid
-        if not valid:fail('historical_video_backup_hash_mismatch',lesson_id=str(row.get('lesson_id')),path=row.get('path'))
-    for lid,source_rows in expected_video.items():
-        for source_row in source_rows:
-            source_id=str(source_row.get('dd_media_id_str') or source_row.get('dd_media_id') or '')
-            row=video_source_lookup.get((lid,source_id))
-            path=local(row.get('path')) if row else None
-            valid=bool(row and row.get('download_complete') and path and path.is_file() and path.stat().st_size==row.get('bytes') and sha(path)==row.get('sha256'))
-            summary['video_source_files_verified']+=valid
-            if not valid:fail('video_source_file_unverified',lesson_id=lid,source_media_id=source_id)
-            elif not row.get('playable') or row.get('decode',{}).get('returncode')!=0:
-                summary['video_source_saved_unplayable']+=1
-                fail('video_source_saved_unplayable',lesson_id=lid,source_media_id=source_id,path=row.get('path'),source_declares_drm=row.get('source_declares_drm'),decode_returncode=row.get('decode',{}).get('returncode'))
-    for row in video_source_rows:
-        hls=row.get('hls',{});playlist=local(hls.get('local_playlist_path'))
-        if not playlist or not playlist.is_file() or sha(playlist)!=hls.get('local_playlist_sha256'):
-            fail('local_hls_playlist_missing_or_hash_mismatch',lesson_id=str(row.get('lesson_id')));continue
-        assets_path=local(hls.get('assets_manifest_path'));assets=load(assets_path,[]) if assets_path else []
-        if not assets:fail('missing_local_hls_assets_manifest',lesson_id=str(row.get('lesson_id')))
-        for asset in assets:
-            path=local(asset.get('path'));valid=bool(path and path.is_file() and path.stat().st_size==asset.get('bytes') and sha(path)==asset.get('sha256'))
-            summary['hls_assets_verified']+=valid
-            if asset.get('kind')=='segment':summary['hls_segments_verified']+=valid
-            if not valid:fail('local_hls_asset_hash_mismatch',lesson_id=str(row.get('lesson_id')),path=asset.get('path'))
-        lines=read_text(playlist,encoding='utf-8-sig').splitlines()
-        segment_refs=[]
-        for line in lines:
-            refs_in_line=re.findall(r'URI="([^"]+)"',line) if line.startswith('#') else ([line.strip()] if line.strip() else [])
-            for value in refs_in_line:
-                target=local(value,playlist.parent)
-                if not target or not target.is_file():fail('nonlocal_or_missing_hls_reference',lesson_id=str(row.get('lesson_id')),value=value[:150])
-                if not line.startswith('#'):segment_refs.append(value)
-        if len(segment_refs)!=hls.get('segments') or '#EXT-X-ENDLIST' not in lines:fail('local_hls_segment_count_or_end_marker_mismatch',lesson_id=str(row.get('lesson_id')))
-    for report_path in (ROOT/'raw').rglob('*.json'):
-        if report_path.resolve() in EXCLUDED_FILES or 'finalization-audits' in report_path.parts or report_path.name.endswith('.info.json') or report_path.name.endswith('.body.json') or 'lessons' in report_path.parts:continue
-        try:saved=load(report_path,{})
-        except (ValueError,OSError):continue
-        for node in walk(saved):
-            if isinstance(node,dict) and isinstance(node.get('path'),str) and node['path'].startswith(('assets/audio/','assets/video/')) and node.get('sha256'):
-                evidence[node['path']].append((node,str(report_path.relative_to(ROOT))))
-    verified_paths={}
-    for lesson in course.get('lessons',[]):
-        lid=str(lesson['id'])
-        for kind in ('audio','video'):
-            for track in lesson.get(kind,[]) or []:
-                value=track.get('path','');path=local(value)
-                if not path or not path.is_file() or not path.stat().st_size:fail('missing_local_media',lesson_id=lid,media_kind=kind,path=value);continue
-                if value in verified_paths:summary[kind+'_track_references_verified']+=verified_paths[value];continue
-                digest=sha(path)
-                matches=[(row,where) for row,where in evidence.get(value,[]) if row.get('sha256')==digest and row.get('bytes')==path.stat().st_size and row.get('full_decode_exit_code',row.get('decode',{}).get('returncode'))==0 and row.get('status') in {'complete','decrypted_verified'}]
-                valid=bool(matches)
-                if not matches:fail('missing_matching_full_decode_evidence',lesson_id=lid,media_kind=kind,path=value)
-                if args.probe_media or args.decode:
-                    probe=subprocess.run(['ffprobe','-v','error','-show_entries','format=duration,size:stream=codec_type,codec_name,width,height,sample_rate,channels','-of','json',str(path)],capture_output=True,text=True,timeout=60)
-                    metadata=json.loads(probe.stdout) if probe.returncode==0 else {};probe_origin='independent_ffprobe'
-                else:
-                    record=matches[0][0] if matches else {}
-                    metadata=record.get('ffprobe') or record.get('probe',{}).get('data') or {};probe_origin='matching_full_decode_report'
-                streams=metadata.get('streams',[])
-                required='video' if kind=='video' else 'audio'
-                stream_valid=any(row.get('codec_type')==required or kind=='audio' and row.get('codec_name') and row.get('sample_rate') and row.get('channels') for row in streams)
-                duration=float(metadata.get('format',{}).get('duration',0))
-                if kind=='video':
-                    stream_valid=stream_valid and any(row.get('codec_type')=='audio' for row in streams)
-                    selected_resolution=int(matches[0][0].get('resolution_selected') or 0) if matches else 0
-                    stream_valid=stream_valid and max([int(row.get('height',0)) for row in streams if row.get('codec_type')=='video'],default=0)>=selected_resolution
-                if not stream_valid or duration<=0:valid=False;fail('invalid_media_probe',path=value,media_kind=kind)
-                expected_duration=(matches[0][0].get('expected_duration_seconds') or matches[0][0].get('expected_duration') or matches[0][0].get('source_duration')) if matches else None
-                if expected_duration and abs(duration-float(expected_duration))>max(3,float(expected_duration)*.02):valid=False;fail('media_duration_mismatch',path=value)
-                if args.decode:
-                    result=subprocess.run(['ffmpeg','-nostdin','-v','error','-xerror','-i',str(path),'-f','null','-'],capture_output=True,text=True,timeout=600)
-                    if result.returncode:valid=False;fail('full_decode_failed',path=value)
-                verified_paths[value]=valid;summary[kind+'_media_verified']+=valid;summary[kind+'_track_references_verified']+=valid
-                media_checks.append({'path':value,'kind':kind,'bytes':path.stat().st_size,'sha256':digest,'duration_seconds':duration,'status':'verified' if valid else 'failed','full_decode_evidence_reports':list(dict.fromkeys(where for _,where in matches)),'probe_metadata':metadata,'probe_origin':probe_origin,'full_decode_repeated':args.decode})
-    web_by_lid={str(row.get('lesson_id')):row for row in video_source_rows}
-    decrypted_report=load(ROOT/'raw/legacy-video-decryption-report.json',{})
-    decrypted_by_lid={str(row.get('lesson_id')):row for row in decrypted_report.get('videos',[])}
-    using_decrypted_defaults=False
-    for lesson in course.get('lessons',[]):
-        lid=str(lesson['id']);tracks=lesson.get('video',[]) or []
-        if any(track.get('path','').startswith('assets/video/decrypted/') for track in tracks):
-            using_decrypted_defaults=True
-            record=decrypted_by_lid.get(lid,{})
-            if len(tracks)!=1 or tracks[0].get('path')!=record.get('path') or record.get('status')!='decrypted_verified':
-                fail('decrypted_default_media_mapping_mismatch',lesson_id=lid)
-            else:summary['decrypted_default_videos_verified']+=1
-        for alternative in lesson.get('video_web_alternatives',[]) or []:
-            record=web_by_lid.get(lid,{})
-            path=local(alternative.get('path'))
-            valid=bool(path and path.is_file() and alternative.get('path')==record.get('path') and path.stat().st_size==record.get('bytes') and sha(path)==record.get('sha256') and record.get('status')=='complete' and record.get('decode',{}).get('returncode')==0)
-            summary['retained_web_video_alternatives_verified']+=valid
-            if not valid:fail('retained_web_video_alternative_invalid',lesson_id=lid,path=alternative.get('path'))
-    if using_decrypted_defaults:
-        expected_videos=sum(len(row) for row in expected_video.values())
-        if summary['decrypted_default_videos_verified']!=expected_videos or summary['retained_web_video_alternatives_verified']!=expected_videos:
-            fail('decrypted_default_or_web_alternative_count_mismatch')
-        review=load(ROOT/'raw/independent-legacy-decryption-review.json',{})
-        if review.get('status')!='passed' or review.get('summary',{}).get('passed_videos')!=expected_videos or review.get('summary',{}).get('independent_full_decode_samples')!=min(3,expected_videos):
-            fail('missing_complete_independent_legacy_decryption_review')
-        for record in review.get('videos',[]):
-            live=decrypted_by_lid.get(str(record.get('lesson_id')),{})
-            if record.get('output_sha256')!=live.get('sha256') or record.get('source_sha256')!=live.get('source_sha256'):
-                fail('independent_legacy_review_hash_binding_mismatch',lesson_id=str(record.get('lesson_id')))
+        if path and path.is_file():sha(path)
+        if row.get('source_metadata_warnings'):warnings.append({'kind':'source_image_metadata_warning','path':row.get('path'),'details':row['source_metadata_warnings']})
     summary['expected_audio_aliases']=len(set().union(*expected_audio.values())) if expected_audio else 0
     summary['expected_video_entries']=sum(len(row) for row in expected_video.values())
     index=ROOT/'index.html';embedded=None
@@ -399,9 +311,9 @@ def main():
         if not path or not path.is_file() or sha(path)!=snapshot['sha256']:fail('input_changed_during_audit',role=role)
     if CHANGED_FILES:fail('files_changed_during_audit',paths=sorted(CHANGED_FILES))
     summary['resource_references_checked']=resource_checks;summary['errors']=len(errors);summary['warnings']=len(warnings)
-    report={'schema_version':1,'checked_at_utc':datetime.now(timezone.utc).isoformat(),'status':'passed' if not errors else 'failed','archive_status':'complete' if not errors else 'partial','method':{'text':'Independently extract source contents and quote metadata, compare characters in order after whitespace normalization. Retain exact UTF-8 original content bytes.','media':'Current file hashes and sizes must match full-decode reports with zero exit status; matching probe metadata is cross-checked. Optional flags repeat FFprobe or full decode. Source HLS assets and local playlists are independently hash-checked; historical encrypted source backups are retained separately.','offline':'Check HTML/embedded lesson bodies/CSS/media references, local assets and reader network APIs; external citation links are not reader media dependencies.'},'summary':dict(summary),'source_archive':{'path':args.archive,'sha256':sha(ROOT/args.archive)},'lessons':lesson_checks,'media':media_checks,'errors':errors,'warnings':warnings}
+    report={'schema_version':2,'validation_schema_version':2,'evidence_role':'local_archive_audit','mode':args.mode,'audit_run_id':media_run.run_id if media_run else None,'checked_at_utc':datetime.now(timezone.utc).isoformat(),'status':'passed' if not errors else 'failed','archive_status':'local_verified' if not errors else 'partial','method':{'text':'Independently extract source contents and quote metadata, compare characters in order after whitespace normalization. Retain exact UTF-8 original content bytes.','media':'Current file hashes and sizes must match full-decode reports with zero exit status; matching probe metadata is cross-checked. Optional flags repeat FFprobe or full decode. Source HLS assets and local playlists are independently hash-checked; historical encrypted source backups are retained separately.','offline':'Check HTML/embedded lesson bodies/CSS/media references, local assets and reader network APIs; external citation links are not reader media dependencies.'},'summary':dict(summary),'source_archive':{'path':args.archive,'sha256':sha(ROOT/args.archive)},'image_validation':{'path':'raw/image-verification.json','status':image_validation.get('status')},'inventory':inventory_audit,'content_manifest_sha256':content_manifest_digest(course),'lessons':lesson_checks,'media':media_checks,'errors':errors,'warnings':warnings}
     report.update({'manifest_snapshot_sha256':input_snapshots.get('manifest',{}).get('sha256'),'source_archive':input_snapshots.get('source_archive',{}),'source_catalog':input_snapshots.get('source_catalog',{}),'input_snapshots':input_snapshots,'audited_files':[FILE_SNAPSHOTS[key] for key in sorted(FILE_SNAPSHOTS)],'course_identity':{'course_enid':course.get('course_enid'),'source_url':course.get('source_url'),'lesson_ids':actual}})
-    output=ROOT/args.output;output.parent.mkdir(parents=True,exist_ok=True);output.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
+    output=ROOT/args.output;atomic_json(output,report)
     print(json.dumps({'status':report['status'],'archive_status':report['archive_status'],'summary':report['summary'],'output':args.output},ensure_ascii=False))
     return 0 if not errors else 1
 

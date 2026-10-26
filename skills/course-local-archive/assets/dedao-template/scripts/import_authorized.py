@@ -19,7 +19,9 @@ import urllib.parse
 import urllib.request
 
 from export_public import ROOT, write_json
+from archive_state import course_lock, compare_and_write_manifest, sha_file
 from archive_config import configured_course_id
+from image_assets import download_image as save_image, metadata_html_images
 from import_ui import Tree, all_text, canonical_text, markdown_node
 from build_site import markdown as render_markdown
 
@@ -37,37 +39,14 @@ def image_locations(value):
         kind = value.get("type")
         for key, child in list(value.items()):
             is_url = isinstance(child, str) and child.startswith(("https://", "http://"))
-            if is_url and ((key == "url" and kind in {"image", "inline-image"}) or key in {"avatar", "cover", "cover_img", "coverImg", "poster", "index_img", "indexImg", "icon", "image", "img", "logo", "article_logo", "logo_iphonex", "square_img", "outline_img", "player_img", "lecturer_avatar"}):
+            if is_url and ((key == "url" and kind in {"image", "inline-image"}) or key in {"avatar", "cover", "cover_img", "coverImg", "poster", "index_img", "indexImg", "icon", "image", "img", "logo", "article_logo", "logo_iphonex", "square_img", "outline_img", "player_img", "lecturer_avatar", "index_img_applet", "special_logo", "logo_for_lecture"}):
                 yield value, key
             elif isinstance(child, (dict, list)):
                 yield from image_locations(child)
 
 
 def download_image(url, old):
-    if old and (ROOT / old["path"]).is_file():
-        body = (ROOT / old["path"]).read_bytes()
-        if sha(body) == old.get("sha256"):
-            return old
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(request, timeout=35) as response:
-        body = response.read()
-    if body.startswith(b"\xff\xd8\xff"):
-        suffix = ".jpg"
-    elif body.startswith(b"\x89PNG\r\n\x1a\n"):
-        suffix = ".png"
-    elif body.startswith((b"GIF87a", b"GIF89a")):
-        suffix = ".gif"
-    elif body.startswith(b"RIFF") and body[8:12] == b"WEBP":
-        suffix = ".webp"
-    elif b"ftypavif" in body[:32] or b"ftypavis" in body[:32]:
-        suffix = ".avif"
-    else:
-        raise ValueError("The image URL did not return a recognized raster image")
-    target = ROOT / "assets/images" / (sha(url)[:16] + suffix)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(body)
-    return {"source_url": url, "path": target.relative_to(ROOT).as_posix(), "bytes": len(body), "sha256": sha(body), "roles": list(old.get("roles", [])) if old else []}
-
+    return save_image(ROOT, url, old)
 
 def escape(value):
     return html.escape(str(value), quote=True)
@@ -205,13 +184,13 @@ class Renderer:
                 picture, _ = self.image(author["avatar"]) if author.get("avatar") else ("", "")
                 name = author.get("name", "")
                 markup = '<div class="source-quote"><div class="source-author">' + picture + "<p>" + escape(name) + '</p></div><blockquote style="white-space: pre-line"><p>' + content + "</p></blockquote></div>"
-                expected = block.get("text", name + plain)
+                expected = name + plain
             elif subtype == 2:
                 answer = block.get("answer", {})
                 title = answer.get("title", "")
                 asker = answer.get("askName", "")
                 markup = '<div class="source-answer"><p>' + escape(title) + '</p><blockquote style="white-space: pre-line">' + (escape(asker) + " " if asker else "") + content + "</blockquote></div>"
-                expected = block.get("text", title + asker + plain)
+                expected = title + asker + plain
             else:
                 markup = '<blockquote style="white-space: pre-line">' + content + "</blockquote>"
         elif kind == "hr":
@@ -226,6 +205,26 @@ class Renderer:
             expected = title + description
             if not same_audio:
                 self.issues.append({"kind": "embedded_audio_requires_source", "alias_id": block.get("aliasId", block.get("alias_id", "")), "title": title})
+        elif kind == "video":
+            media_id = str(block.get("mediaId", ""))
+            declared = (self.lesson.get("info", {}).get("article_info") or {}).get("video") or []
+            matching = [item for item in declared if str(item.get("dd_media_id_str") or item.get("dd_media_id") or "") == media_id]
+            if not media_id or len(matching) != 1:
+                self.issues.append({"kind": "embedded_video_source_not_mapped", "source_media_id": media_id})
+            picture, _ = self.image(block.get("poster", "")) if block.get("poster") else ("", "")
+            title = str(block.get("title", ""))
+            markup = '<figure class="source-video" data-source-media-id="' + escape(media_id) + '">' + picture + '<figcaption>' + escape(title) + '</figcaption></figure>'
+            expected = title
+        elif kind == "product-item":
+            info = block.get("info") or {}
+            picture, _ = self.image(info.get("cover", "")) if info.get("cover") else ("", "")
+            values = [str(info.get(key, "")) for key in ("title", "des", "price")]
+            markup = '<aside class="source-product" data-source-product-id="' + escape(block.get("id", "")) + '" data-source-product-type="' + escape(block.get("ptype", "")) + '">' + picture + ''.join('<p style="white-space: pre-line">' + escape(value) + '</p>' for value in values) + '</aside>'
+            expected = ''.join(values)
+        elif kind == "vote" and set(block) == {"type"}:
+            markup = '<span class="source-vote" data-source-block="vote" data-source-content="not-provided"></span>'
+            expected = ""
+            self.issues.append({"kind": "source_interaction_marker_only", "type": "vote", "block_index": index, "source_fields": ["type"], "detail": "The authorized web source supplies no poll question or options"})
         elif kind == "label-group":
             labels = block.get("labels", [])
             markup = '<p class="source-labels">' + " ".join(escape(label) for label in labels) + "</p>"
@@ -292,6 +291,9 @@ def main():
     for parent, key in image_locations(archive.get("course", {})):
         image_roles.setdefault(parent[key], set()).add("course-metadata")
         metadata_image_urls.add(parent[key])
+    for url in metadata_html_images(archive.get("metadata") or {}):
+        image_roles.setdefault(url,set()).add("course-metadata-html")
+        metadata_image_urls.add(url)
     for item in items:
         item["id"] = str(item["id"])
         known = catalog.get(item["id"])
@@ -391,7 +393,7 @@ def main():
         localized_info_path = ROOT / "content" / (stem + ".info.local.json")
         write_json(localized_info_path, localized_info)
         missing_images = [source for source in refs + metadata_refs if source not in image_map]
-        body_issues = [issue for issue in renderer.issues if issue["kind"] != "embedded_audio_requires_source"]
+        body_issues = [issue for issue in renderer.issues if issue["kind"] not in {"embedded_audio_requires_source", "source_interaction_marker_only"}]
         updates[identifier] = {
             "html_path": html_path.relative_to(ROOT).as_posix(), "markdown_path": markdown_path.relative_to(ROOT).as_posix(),
             "raw_blocks_path": "raw/lessons/" + identifier + ".blocks.json", "localized_blocks_path": local_blocks_path.relative_to(ROOT).as_posix(),
@@ -414,15 +416,17 @@ def main():
         block_types.update(renderer.types)
     # One manifest write after reading the latest version preserves a separately
     # completed audio pipeline's fields and all untouched lesson imports.
-    course = json.loads(manifest_path.read_text())
-    for lesson in course["lessons"]:
-        lesson.update(updates.get(lesson["id"], {}))
-    course.pop("audio_policy", None)
-    if image_errors or any(update["status"] != "imported" or update["images_status"] != "complete" for update in updates.values()):
-        course["archive_status"] = "partial"
-    elif not args.render_only and course.get("archive_status") != "complete":
-        course["archive_status"] = "partial"
-    write_json(manifest_path, course)
+    with course_lock(ROOT):
+        manifest_sha=sha_file(manifest_path)
+        course = json.loads(manifest_path.read_text())
+        for lesson in course["lessons"]:
+            lesson.update(updates.get(lesson["id"], {}))
+        course.pop("audio_policy", None)
+        if image_errors or any(update["status"] != "imported" or update["images_status"] != "complete" for update in updates.values()):
+            course["archive_status"] = "partial"
+        elif not args.render_only and course.get("archive_status") != "complete":
+            course["archive_status"] = "partial"
+        compare_and_write_manifest(ROOT,manifest_sha,course)
     directory = ["# " + course["title"], "", course.get("description", ""), "", "来源：" + course.get("source_url", ""), "", "[课程介绍、讲师简介与章节导读](课程信息.md)", ""]
     for section in course.get("sections", []):
         directory.extend(["## " + section["title"], ""])
@@ -442,7 +446,7 @@ def main():
         "external_route_evidence_sha256": sha(route_path.read_bytes()) if external_routes else None,
     }
     write_json(ROOT / "raw/authorized-import-report.json", report)
-    issues = sum(len([issue for issue in lesson["issues"] if issue["kind"] != "embedded_audio_requires_source"]) for lesson in reports.values())
+    issues = sum(len([issue for issue in lesson["issues"] if issue["kind"] not in {"embedded_audio_requires_source", "source_interaction_marker_only"}]) for lesson in reports.values())
     print(json.dumps({"phase": "finished", "imported_bodies": len(updates), "body_issues": issues, "image_errors": len(image_errors), "audio_queue": len(audio_queue)}, ensure_ascii=False), flush=True)
     if image_errors or issues:
         raise SystemExit(1)

@@ -1,15 +1,23 @@
 {
   "schema_version": 1,
   "platform": "dedao",
-  "template_version": 1,
+  "template_version": 2,
   "contains_course_content": false,
   "contains_account_or_media_secrets": false,
   "finalization": {
     "command": "python3 scripts/finalize_archive.py --apply",
     "default_without_apply": "read-only validation preview",
-    "requires": ["fresh passed audit", "same course and ordered catalog", "unchanged manifest and source snapshots", "unchanged audited output hashes", "complete per-lesson states"],
+    "requires": [
+      "fresh passed audit",
+      "same course and ordered catalog",
+      "unchanged manifest and source snapshots",
+      "unchanged audited output hashes",
+      "complete per-lesson states"
+    ],
     "retained_audit_snapshots": "raw/finalization-audits/<audit-sha256>.json",
-    "after_apply": "rerun audit_archive.py to bind the completed manifest"
+    "after_apply": "rerun incremental audit to bind local_verified manifest; actual browser QA and verify_delivery.py independently gate fully_delivered",
+    "result": "local_verified only",
+    "delivery_command": "python3 scripts/verify_delivery.py"
   },
   "network_during_initialization": false,
   "identity_configuration": {
@@ -61,6 +69,8 @@
       "video"
     ],
     "retained_video_arrays": [
+      "video_plaintext_original",
+      "video_decrypted_original",
       "video_web_alternatives",
       "video_encrypted_original"
     ],
@@ -75,7 +85,13 @@
       "archive_report"
     ],
     "media_paths_relative_to": "archive root",
-    "body_embedded_paths_relative_to": "body source file"
+    "body_embedded_paths_relative_to": "body source file",
+    "additional_media_arrays": [
+      "course_intro_video",
+      "course_intro_audio",
+      "subtitles",
+      "video_audio_components"
+    ]
   },
   "runtime": {
     "python": ">=3.9",
@@ -92,5 +108,22 @@
     "attribution": "Brclio (黄家宝)",
     "license": "CC BY-NC-SA 4.0",
     "license_url": "https://creativecommons.org/licenses/by-nc-sa/4.0/"
+  },
+  "verification": {
+    "inventory": "source-derived media_inventory.py; missing expected resources fail",
+    "modes": [
+      "incremental",
+      "fresh"
+    ],
+    "fresh_resume": "explicit same audit run and current SHA match only",
+    "images": "original bytes, all frames decoded, evidence-based metadata warning classification",
+    "media": "all AV streams decoded to EOF; current HLS URI/assets hashes and lossless packet proof",
+    "lifecycle": [
+      "partial",
+      "local_verified"
+    ],
+    "delivery_status_path": "raw/delivery/status.json",
+    "full_delivery_status": "fully_delivered",
+    "browser_proof": "actual loaded payload and versioned runtime plus UI observations; never synthetic claims"
   }
 }
