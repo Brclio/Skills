@@ -11,6 +11,7 @@
 
 ## Skills 列表
 
+- `thinking-picture-books`：创作、扩展或修订儿童思维训练绘本，支持照片角色、角色 DNA、年龄与难度配置，默认 32 页、常规最低 30 页；由内置 imagegen 生成完整图文页，并检查题目答案与跨页一致性。安装、调用、配置示例和交付说明见 [`skills/thinking-picture-books/README.md`](skills/thinking-picture-books/README.md)。
 - `course-local-archive`：将已登录、已购或获授权的课程完整保存为原文 Markdown、HTML、图片、音频、视频与离线阅读网站；保留网页片源、原始 HLS 清单与分片、加密原件和经过验证的实际解密版本，附完整性审计。内置得到适配及旧版 v1 MP4 解密流程；其他平台按已验证适配处理。安装与调用见下方「课程完整离线归档」，工作流见 [`skills/course-local-archive/SKILL.md`](skills/course-local-archive/SKILL.md)。
 - `zhixing-shipinhao-yijiancun`：视频号一键存免邀请码版，将本人发布或已获授权的视频号链接保存为本地 MP4；支持单条、最多 50 条批量、去重、有限并发和结果清单。无需作者侧激活或在线核验，首次仍需本人扫码登录腾讯元宝。安装、调用、排错与实测边界见 [`skills/zhixing-shipinhao-yijiancun/README.md`](skills/zhixing-shipinhao-yijiancun/README.md)。
 - `blindbox-ip-skill-4styles`：将个人或品牌描述转化为可复用的内容配图角色，提供治愈绘本手绘、极简符号卡通、盲盒潮玩公仔和日常扁平漫画四种画风；交付角色价值观、视觉 DNA、正面图、三视图、角色参考板、分层提示词和一致性测试图。使用说明见 [`skills/blindbox-ip-skill-4styles/README.md`](skills/blindbox-ip-skill-4styles/README.md)，授权范围见该目录下的 `LICENSE`。

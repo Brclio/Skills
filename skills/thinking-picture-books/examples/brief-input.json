@@ -1,0 +1,13 @@
+{
+  "age": 5,
+  "difficulty": "入门",
+  "theme": "海洋探索",
+  "scene": "潮池观察站",
+  "learning_focus": "观察",
+  "page_count": 32,
+  "book_count": 1,
+  "language": "简体中文",
+  "abilities": "成人读题，孩子指认或说出可见线索，不要求识字和书写",
+  "avoid": ["恐吓情节", "竞争性速度排名"],
+  "constraints": ["每页一个主要操作", "按章节分段共读"]
+}

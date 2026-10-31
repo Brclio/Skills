@@ -1,0 +1,4 @@
+interface:
+  display_name: "思维训练绘本工坊"
+  short_description: "生成至少30页的思维训练绘本，可定制角色、分龄难度，图文均由imagegen生成"
+  default_prompt: "使用 $thinking-picture-books，生成一本32页的原创思维训练绘本，未指定的角色、场景和主题自动选择。"
